@@ -1,0 +1,16 @@
+# Ignore data-related folders
+data/
+sentences/
+checkpoints/
+wandb/
+
+# Ignore models and outputs
+finetuned_llms/
+decoders/
+
+# Ignore environment/editor files
+.vscode/
+.conda/
+__pycache__/
+.DS_Store*
+
