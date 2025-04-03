@@ -50,8 +50,7 @@ decoder.eval()
 
 # Build the UI
 root = tk.Tk()
-root.title("Decoder UI")
-
+root.title("Decoder UI with Finetuned LLM")
 # Widgets
 tk.Label(root, text="Enter a sentence:").pack(pady=5)
 

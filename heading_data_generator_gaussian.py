@@ -8,9 +8,9 @@ from google import genai
 import time
 import json
 import os
-
+from api_keys import GEMINI_API_KEY_1
 # Set your Gemini API key
-genai_client = genai.Client(api_key="AIzaSyB4fgX4BJr0Y6oAvgCcI0IaNceBw2_S7yQ")
+genai_client = genai.Client(api_key=GEMINI_API_KEY_1)
 
 # Parameters
 NUM_DATA_TARGETS = 1500

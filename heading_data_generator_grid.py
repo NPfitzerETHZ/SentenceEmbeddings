@@ -12,10 +12,12 @@ from PIL import Image
 from tqdm import tqdm
 from google import genai
 
+from api_keys import GEMINI_API_KEY_2
+
 # ========================== Configuration ==========================
 
 # Gemini API Key
-genai_client = genai.Client(api_key="AIzaSyCychUuEpP32zRrX92jzep-1FqfYOASMGU")  # 🔐 Replace with your actual key
+genai_client = genai.Client(api_key=GEMINI_API_KEY_2)  # 🔐 Replace with your actual key
 
 # Dataset generation parameters
 NUM_DATA_TARGETS = 1500

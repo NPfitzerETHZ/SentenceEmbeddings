@@ -5,9 +5,10 @@ import random
 from io import BytesIO
 from PIL import Image
 from google import genai
+from api_keys import GEMINI_API_KEY_3
 
 # Set your Gemini API key
-genai_client = genai.Client(api_key="AIzaSyC6WV7Xto20AETHSFKSTI0_gJlvJb-HKDY")
+genai_client = genai.Client(api_key=GEMINI_API_KEY_3)
 
 direction_terms = {
     "ern": "eastern, western, southern, northern, center",

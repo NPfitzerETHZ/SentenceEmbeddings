@@ -74,20 +74,16 @@ def predict():
 
     grid = prediction.reshape(output_grid_dim, output_grid_dim)
 
-    # Clear plot and colorbar
-    ax.clear()
+    # Clear entire figure
+    fig.clf()
 
-    # Plot new heatmap
+    # Create fresh axes
+    ax = fig.add_subplot(111)
     im = ax.imshow(grid, cmap='viridis')
     ax.set_title(f"Decoder Output ({output_grid_dim}x{output_grid_dim} Grid)")
-    #ax.invert_yaxis()
 
-    # # Remove old colorbar if it exists
-    # if colorbar:
-    #     colorbar.clear()
-
-    # # Add new colorbar and track it
-    #colorbar = fig.colorbar(im, ax=ax)
+    # Create a fresh colorbar
+    colorbar = fig.colorbar(im, ax=ax)
 
     canvas.draw()
     result_var.set("Prediction completed and visualized.")
