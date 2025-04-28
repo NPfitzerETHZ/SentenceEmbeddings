@@ -1,9 +1,9 @@
 import torch
 import google.generativeai as genai
-from api_keys import GEMINI_API_KEY_1
+from api_keys import GEMINI_API_KEY
 
 # Configure Google AI API
-API_KEY = GEMINI_API_KEY_1  # Replace with your actual API key
+API_KEY = GEMINI_API_KEY  # Replace with your actual API key
 genai.configure(api_key=API_KEY)
 
 # Select the embedding model

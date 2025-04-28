@@ -5,7 +5,6 @@ import tqdm
 import wandb
 import pandas as pd
 from sentence_transformers import SentenceTransformer
-from heading_ideas import Heading
 from process_gemini_data import collect_train_test_data_grid, collect_train_test_data_from_embeddings
 
 # Define available LLMs
@@ -15,7 +14,7 @@ llms = {
     SentenceTransformer('thenlper/gte-large'): "thenlper/gte-large"
 }
 
-json_data_file = "data/language_data_complete_single_target_finetuned.json"
+json_data_file = "data/language_data_complete_multi_target_color_medium.json"
 
 # Define the Decoder model in PyTorch
 # class Decoder(nn.Module):
@@ -36,39 +35,42 @@ json_data_file = "data/language_data_complete_single_target_finetuned.json"
 #         return torch.tanh(self.l2(x))
     
 #MLP on sterroids
+# class Decoder(nn.Module):
+#     def __init__(self, emb_size, out_size, hidden_size=256):
+#         super().__init__()
+#         self.norm_input = nn.LayerNorm(emb_size)
+#         self.l0 = nn.Linear(emb_size, hidden_size)
+#         self.l1 = nn.Linear(hidden_size, hidden_size)
+#         self.l2 = nn.Linear(hidden_size, out_size)
+#         self.norm_hidden = nn.LayerNorm(hidden_size)
+#         self.act = nn.LeakyReLU(0.1)
+#         self.dropout = nn.Dropout(0.3)
+
+#     def forward(self, x):
+#         x = self.norm_input(x)
+#         x = self.dropout(self.act(self.l0(x)))
+#         x = self.norm_hidden(x)
+#         x = self.dropout(self.act(self.l1(x)))
+#         return torch.tanh(self.l2(x))
+
 class Decoder(nn.Module):
     def __init__(self, emb_size, out_size, hidden_size=256):
         super().__init__()
         self.norm_input = nn.LayerNorm(emb_size)
         self.l0 = nn.Linear(emb_size, hidden_size)
-        self.l1 = nn.Linear(hidden_size, hidden_size)
-        self.l2 = nn.Linear(hidden_size, out_size)
-        self.norm_hidden = nn.LayerNorm(hidden_size)
-        self.act = nn.LeakyReLU(0.1)
+        self.l1 = nn.Linear(hidden_size, out_size)
+        self.act = nn.ReLU()
         self.dropout = nn.Dropout(0.3)
 
     def forward(self, x):
-        x = self.norm_input(x)
-        x = self.dropout(self.act(self.l0(x)))
-        x = self.norm_hidden(x)
-        x = self.dropout(self.act(self.l1(x)))
-        return torch.tanh(self.l2(x))
+        x = self.act(self.l0(x))
+        return torch.tanh(self.l1(x))
 
 
 # Define loss function
 def loss_fn(model, emb, goal):
     pred = model(emb)
     return torch.mean(torch.norm(pred - goal, dim=-1))
-
-# def weighted_loss_fn(model, emb, goal, weights=None):
-
-#     pred = model(emb)
-#     if weights is None:
-#         weights = torch.tensor([2.0, 2.0, 1.0, 1.0], device=pred.device)
-#     diff = pred - goal
-#     weighted_diff = diff * weights
-#     weighted_loss = torch.mean(torch.norm(weighted_diff, dim=-1))
-#     return weighted_loss
 
 
 results = {}
@@ -77,11 +79,8 @@ patience_counter = 0
 for llm, llm_name in llms.items():
     wandb.init(project='grid_decoder_llm', name=llm_name)
     batch_size = 128
-    epochs = 2500
+    epochs = 1000
 
-    # heading = Heading(batch_size=batch_size * 100)
-    # train = heading._initalize_heading(eval=False, model=llm)
-    # test = heading._initalize_heading(eval=True, model=llm)
     train, test = collect_train_test_data_from_embeddings(json_path=json_data_file,train_ratio=0.8,test_ratio=0.2, device="mps")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "mps")
@@ -93,6 +92,7 @@ for llm, llm_name in llms.items():
 
     for epoch in range(epochs):
         for i in range(train["task_embedding"].shape[0] // batch_size):
+            
             emb = torch.tensor(train["task_embedding"][i * batch_size : (i + 1) * batch_size], dtype=torch.float32).to(device)
             goal = torch.tensor(train["goal"][i * batch_size : (i + 1) * batch_size], dtype=torch.float32).to(device)
 
@@ -118,7 +118,7 @@ for llm, llm_name in llms.items():
     
     results[llm_name] = best_val_loss
     wandb.finish()
-    torch.save(model.state_dict(), f"llm{m}_decoder_model_grid_danger&target.pth")
+    torch.save(model.state_dict(), f"llm{m}_decoder_model_grid_single_target.pth")
     m += 1
 
 print(results)

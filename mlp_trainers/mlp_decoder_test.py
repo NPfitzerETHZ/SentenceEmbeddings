@@ -17,20 +17,24 @@ class Decoder(nn.Module):
         self.l0 = nn.Linear(emb_size, hidden_size)
         self.l1 = nn.Linear(hidden_size, hidden_size)
         self.l2 = nn.Linear(hidden_size, hidden_size)
-        self.l3 = nn.Linear(hidden_size, out_size)
+        self.l3 = nn.Linear(hidden_size, hidden_size)
+        self.l4 = nn.Linear(hidden_size, out_size)
+        #self.l2 = nn.Linear(hidden_size, out_size)
         self.relu = nn.ReLU()
+        self.leakyrelu = nn.LeakyReLU(0.1)
 
     def forward(self, embed):
-        x = self.relu(self.l0(embed))
-        x = self.relu(self.l1(x))
-        x = self.relu(self.l2(x))
-        return self.l3(x)
+        x = self.leakyrelu(self.l0(embed))
+        x = self.leakyrelu(self.l1(x))
+        x = self.leakyrelu(self.l2(x))
+        x = self.leakyrelu(self.l3(x))
+        return torch.tanh(self.l4(x))
 
 
 # Load the trained decoder model
-model_path = "llm0_decoder_model.pth"  # Update this path if needed
+model_path = "llm0_decoder_model_grid_single_target_color_class.pth"  # Update this path if needed
 embedding_size = llm.encode(["dummy"], device=device).shape[1]
-model = Decoder(embedding_size,4).to(device)
+model = Decoder(embedding_size,11).to(device)
 model.load_state_dict(torch.load(model_path, map_location=device))
 model.eval()
 

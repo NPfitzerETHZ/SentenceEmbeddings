@@ -5,10 +5,24 @@ import random
 from io import BytesIO
 from PIL import Image
 from google import genai
-from api_keys import GEMINI_API_KEY_3
+from api_keys import GEMINI_API_KEY
 
 # Set your Gemini API key
-genai_client = genai.Client(api_key=GEMINI_API_KEY_3)
+genai_client = genai.Client(api_key=GEMINI_API_KEY)
+
+color_dict = {
+    "red":      {"rgb": [1.0, 0.0, 0.0], "index": 0},
+    "green":    {"rgb": [0.0, 1.0, 0.0], "index": 1},
+    "blue":     {"rgb": [0.0, 0.0, 1.0], "index": 2},
+    "yellow":   {"rgb": [1.0, 1.0, 0.0], "index": 3},
+    "orange":   {"rgb": [1.0, 0.5, 0.0], "index": 4},
+    # "cyan":     {"rgb": [0.0, 1.0, 1.0], "index": 5},
+    # "magenta":  {"rgb": [1.0, 0.0, 1.0], "index": 6},
+    # "purple":   {"rgb": [0.5, 0.0, 0.5], "index": 7},
+    # "pink":     {"rgb": [1.0, 0.75, 0.8], "index":8},
+    # "brown":    {"rgb": [0.6, 0.4, 0.2], "index": 9},
+    # "gray":     {"rgb": [0.5, 0.5, 0.5], "index": 10}
+}
 
 direction_terms = {
     "ern": "eastern, western, southern, northern, center",
@@ -46,15 +60,15 @@ danger_zone_terms = ["danger zone", "danger region", "hot zone", "hot region", "
 
 
 # Parameters
-grid_size = 5
+grid_size = 9
 min_patch_size = 2
 max_patch_size = 5
-min_std = 0.5
+min_std = 0.1
 max_std = 1.5
-max_num_patches = 2
-multipatch_prob = 1.0
+max_num_patches = 1
+multipatch_prob = 0.5
 no_patch_prob = 0.0
-danger_zone_prob = 0.5
+danger_zone_prob = 0.0
 
 def get_neighbors(cell, grid_size):
     r, c = cell
@@ -86,9 +100,23 @@ def generate_grid_one_target_and_one_danger():
     
     grid = np.ones((grid_size, grid_size, 3))
     used_cells = set()
-    patch_info = []
+    patch_info = {}
+    patch_info["grid"] = []
     num_patches = 0
     target = True
+    
+    color_info = {}
+    
+    target_color_name, t_color_info = random.choice(list(color_dict.items()))
+    target_index = t_color_info["index"]
+    t_color = t_color_info["rgb"]
+    
+    danger_color_name, d_color_info = random.choice(list(color_dict.items()))
+    danger_index = d_color_info["index"]
+    d_color = d_color_info["rgb"]
+    
+    color_info["target"] = (target_color_name, target_index)
+    color_info["danger"] = (danger_color_name, danger_index)
 
     for patch_idx in range(max_num_patches):
         
@@ -143,9 +171,9 @@ def generate_grid_one_target_and_one_danger():
 
             for r, c in patch:
                 if target:
-                    grid[r, c] = [1, 0, 0]
+                    grid[r, c] = t_color
                 else:
-                    grid[r, c] = [0, 0, 1]
+                    grid[r, c] = d_color
             
         used_cells.update(patch)
 
@@ -157,7 +185,8 @@ def generate_grid_one_target_and_one_danger():
         norm_spread_x = std_x_actual * 2 / (grid_size - 1)
         norm_spread_y = std_y_actual * 2 / (grid_size - 1)
 
-        patch_info.append((norm_center, norm_spread_x, norm_spread_y))
+        patch_info["grid"].append((norm_center, norm_spread_x, norm_spread_y))
+        patch_info["colors"] = color_info
 
     return grid, patch_info, num_patches
 
@@ -235,6 +264,56 @@ def generate_grid_and_two_patches():
 
     return grid, patch_info, num_patches
 
+def generate_grid_and_patches():
+    grid = np.zeros((grid_size, grid_size), dtype=np.int8)
+    used_cells = set()
+    num_patches = 0
+    target_flag = random.random() > danger_zone_prob
+    
+    color_info = []
+
+    if random.random() > no_patch_prob:
+        for patch_idx in range(max_num_patches):
+            
+            color_name, _color_info = random.choice(list(color_dict.items()))
+            color_index = _color_info["index"]
+            _color = _color_info["rgb"]
+            color_info.append({"name":color_name,"index": color_index, "rgb": _color})
+            
+            if patch_idx == 0 or random.random() < multipatch_prob:
+                num_patches += 1
+                candidates = [(random.randint(0, grid_size - 1), random.randint(0, grid_size - 1)) for _ in range(10)]
+                best_start = max(candidates, key=lambda cell: min([np.linalg.norm(np.subtract(cell, u)) for u in used_cells], default=0))
+
+                if best_start in used_cells:
+                    continue
+
+                prob_map = generate_gaussian_prob_map(
+                    center=best_start,
+                    std_x=random.uniform(min_std, max_std),
+                    std_y=random.uniform(min_std, max_std),
+                    grid_size=grid_size
+                )
+
+                patch = {best_start}
+                frontier = set(get_neighbors(best_start, grid_size))
+                target_size = random.randint(min_patch_size, max_patch_size)
+
+                while len(patch) < target_size and frontier:
+                    probs = np.array([prob_map[r, c] if (r, c) not in used_cells else 0. for r, c in frontier])
+                    if probs.sum() == 0: break
+                    next_cell = random.choices(list(frontier), weights=probs, k=1)[0]
+                    patch.add(next_cell)
+                    frontier.remove(next_cell)
+                    frontier.update({n for n in get_neighbors(next_cell, grid_size) if n not in patch and n not in used_cells})
+
+                value = 1 if target_flag else -1
+                for r, c in patch:
+                    grid[r, c] = value
+                used_cells.update(patch)
+
+    return grid, num_patches, target_flag, color_info
+
 # def generate_grid_and_two_patches():
 #     grid = np.ones((grid_size, grid_size, 3))
 #     used_cells = set()
@@ -309,25 +388,64 @@ def plot_grid(grid):
     plt.close(fig)
     return buf
 
-def describe_image(image_buf):
+from matplotlib.patches import Rectangle
+
+def plot_grid_with_rgb(grid, rgb):
+    # Create an RGB image with all white
+    H, W = grid.shape
+    color_img = np.ones((H, W, 3), dtype=np.float32)
+
+    # Apply the rgb color to the positions where grid == 1
+    for i in range(3):
+        color_img[:, :, i] = np.where(grid == 1, rgb[i], 1.0)
+
+    # Plot
+    fig, ax = plt.subplots()
+    ax.imshow(color_img)
     
-    img = Image.open(image_buf)
+    grid_size = grid.shape[0]
+    ax.set_xticks(np.arange(grid_size))
+    ax.set_yticks(np.arange(grid_size))
+    #ax.grid(which='minor', color='black', linewidth=1)
+    ax.tick_params(which='both', bottom=False, left=False, labelbottom=False, labelleft=False)
+
+    # Add outer boundary rectangle
+    rect = Rectangle((-0.45,-0.45), grid_size-0.15, grid_size-0.1,
+                     linewidth=2, edgecolor='black', facecolor='none')
+    ax.add_patch(rect)
+
+    # Save to buffer
+    buf = BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+    buf.seek(0)
+    plt.close(fig)
+
+    return buf
+
+
+def describe_image(image_buf, color_name):
     
-    prompt = f"""You are leading a team of robots.
-    Describe the location and size of each patch with respect to the environment. Red patch is the target. Blue patch is a danger zone. Use sentences. Do not mention color or the grid.
-    The target patch must be reached". "The danger patch must be avoided.
+    num_targets = random.randint(1, 5)
+    plural = "s" if num_targets > 1 else ""
+    
+    prompt = f"""You are leading a team of robots and you need to help them find {num_targets} target{plural}.
+    The image is a simplification of the environment, showing a rough estimate of where the team should look. It does not show the targets, rather a region of high interest.
+    Guide the team and describe the location and size of the {color_name} region with respect to the environment. The more precise you are, the better chance they have to find it.
+    Use sentences and be precise. The color and number of targets must be part of the instruction.
     """
     if random.random() < 0.5:
         prompt += f"""For the target use the term {random.choice(target_terms)}.
-    For the danger zone use the term {random.choice(danger_zone_terms)}.
     For the exploration area use the term {random.choice(environment_terms)}.
     For the location of each patch use the following adjectives: {random.choice(list(direction_terms.values()))}.
     For the size of each patch use at least one of the following adjectives: {random.choice(list(size_terms.values()))}.
+    Be creative in how you address the team.
     """
-                  
+
+    img = Image.open(image_buf)
     response = genai_client.models.generate_content(
-        model="gemini-2.0-flash-lite",
-        contents=[prompt,img])
+        model="gemini-2.0-flash",
+        contents=[prompt, img]
+    )
     return response.text
 
 # prompt = f"""You are leading a team of robots.
@@ -346,17 +464,19 @@ st.title("🗺️ Random Map Generator with Gemini")
 st.write("Click the button to generate a new map and get a description of the red patch.")
 
 if st.button("Generate New Map"):
-    grid, patch_info, num_patches = generate_grid_one_target_and_one_danger()
-    image_buf = plot_grid(grid)
-    st.image(image_buf, caption="Generated Map with Two Patches", use_column_width=True)
+    grid, _,_, color_info = generate_grid_and_patches()
+    image_buf = plot_grid_with_rgb(grid,color_info[0]["rgb"])
+    img = plot_grid(grid)
+    st.image(image_buf, caption="Generated Map with Two Patches", use_container_width=True)
 
-    for i, (norm_start, norm_std_x, norm_std_y) in enumerate(patch_info):
-        st.subheader(f"📌 Normalized Patch {i+1} Details:")
-        st.markdown(f"- **Start location** (normalized): ({norm_start[0]:.2f}, {norm_start[1]:.2f})")
-        st.markdown(f"- **Standard deviations** (normalized): σₓ = {norm_std_x:.2f}, σᵧ = {norm_std_y:.2f}")
+    # print(patch_info["grid"])
+    # for i, (norm_start, norm_std_x, norm_std_y) in enumerate(patch_info["grid"]):
+    #     st.subheader(f"📌 Normalized Patch {i+1} Details:")
+    #     st.markdown(f"- **Start location** (normalized): ({norm_start[0]:.2f}, {norm_start[1]:.2f})")
+    #     st.markdown(f"- **Standard deviations** (normalized): σₓ = {norm_std_x:.2f}, σᵧ = {norm_std_y:.2f}")
 
     with st.spinner("Gemini is thinking..."):
-        description = describe_image(image_buf)
+        description = describe_image(image_buf, color_info[0]["name"])
     st.subheader("🔍 Gemini's Description:")
     st.write(description)
 

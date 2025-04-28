@@ -3,11 +3,58 @@ from sentence_transformers import SentenceTransformer
 from transformers import AutoModel, AutoTokenizer
 import torch
 from tqdm import tqdm
+import google.generativeai as genai
+import time
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from api_keys import GEMINI_API_KEY
+
+# Configure Google AI API
+API_KEY = GEMINI_API_KEY  # Replace with your actual API key
+genai.configure(api_key=API_KEY)
+model = "models/gemini-embedding-exp-03-07"
 
 # File paths
-input_file = 'sentences/gemini_patch_dataset_grid.json'
-output_file = 'data/language_data_complete_single_target_finetuned.json'
+input_file = 'sentences/gemini_patch_dataset_multi_target_color_medium.json'
+output_file = 'data/language_data_complete_multi_target_color_medium.json'
 device = "mps"
+
+def get_resume_index(output_file):
+    try:
+        with open(output_file, 'r') as f:
+            return sum(1 for _ in f)
+    except FileNotFoundError:
+        return 0
+
+def gemini_llm(start_index=0):
+    # Read the full input JSON
+    with open(input_file, 'r') as f:
+        data = json.load(f)
+
+    # Extract texts to embed
+    texts_to_embed = [item['gemini_response'] for item in data if 'gemini_response' in item]
+
+    # Open output file in append mode
+    with open(output_file, 'a') as f_out:
+        for i in tqdm(range(start_index, len(data)), desc="Adding embeddings"):
+            item = data[i]
+            
+            time.sleep(0.75)
+
+            if 'gemini_response' in item:
+                result = genai.embed_content(
+                    model=model,
+                    content=texts_to_embed[i]
+                )
+                item['embedding'] = result["embedding"]
+
+            if 'grid' in item and isinstance(item['grid'], list):
+                item['grid'] = [int(x) for x in item['grid']]
+
+            f_out.write(json.dumps(item) + '\n')
+
+    print(f"Conversion complete. Results saved to {output_file}")
+        
 
 def predtrained_llm():
     # Load model
@@ -88,5 +135,7 @@ def fine_tuned_llm(input_file, output_file):
 
     print(f"Conversion complete. Results saved to {output_file}")
     
+# start_index = get_resume_index(output_file)
+# gemini_llm(start_index=start_index)
 predtrained_llm()
             

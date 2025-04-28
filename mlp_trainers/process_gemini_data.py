@@ -142,5 +142,82 @@ def collect_train_test_data_from_embeddings(json_path, train_ratio, test_ratio, 
 
     return train_dict, test_dict
 
+def collect_train_test_data_from_embeddings_attributes(json_path, train_ratio, test_ratio, device='cpu'):
+    # Load JSON data
+    with open(json_path, 'r') as f:
+        data = [json.loads(line) for line in f]  # Handles newline-delimited JSON
+
+    # Shuffle the data for randomized splitting
+    np.random.shuffle(data)
+
+    data_length = len(data)
+    train_size = int(train_ratio * data_length)
+    test_size = int(test_ratio * data_length)
+
+    # Split into train and test
+    train_data = data[:train_size]
+    test_data = data[train_size : train_size + test_size]
+
+    # Helper function to convert raw data to tensors
+    def process_dataset(dataset):
+        embeddings = [entry["embedding"] for entry in dataset]
+        goals = [[*entry["grid"]] for entry in dataset]
+        classes = [entry["class"] for entry in dataset]
+
+        task_embeddings = torch.tensor(embeddings, dtype=torch.float32, device=device)
+        goal_tensor = torch.tensor(goals, dtype=torch.float32, device=device)
+        class_tensor = torch.tensor(classes, dtype=torch.float32, device=device)
+
+        return {
+            "task_embedding": task_embeddings,
+            "goal": goal_tensor,
+            "class": class_tensor
+        }
+
+    train_dict = process_dataset(train_data)
+    test_dict = process_dataset(test_data)
+
+    return train_dict, test_dict
+
+def collect_train_test_data_from_embeddings_attributes_max(json_path, train_ratio, test_ratio, device='cpu'):
+    # Load JSON data
+    with open(json_path, 'r') as f:
+        data = [json.loads(line) for line in f]  # Handles newline-delimited JSON
+
+    # Shuffle the data for randomized splitting
+    np.random.shuffle(data)
+
+    data_length = len(data)
+    train_size = int(train_ratio * data_length)
+    test_size = int(test_ratio * data_length)
+
+    # Split into train and test
+    train_data = data[:train_size]
+    test_data = data[train_size : train_size + test_size]
+
+    # Helper function to convert raw data to tensors
+    def process_dataset(dataset):
+        embeddings = [entry["embedding"] for entry in dataset]
+        goals = [[*entry["grid"]] for entry in dataset]
+        classes = [entry["class"] for entry in dataset]
+        max_targets = [entry["max_targets"] for entry in dataset]
+
+        task_embeddings = torch.tensor(embeddings, dtype=torch.float32, device=device)
+        goal_tensor = torch.tensor(goals, dtype=torch.float32, device=device)
+        class_tensor = torch.tensor(classes, dtype=torch.float32, device=device)
+        max_tensor = torch.tensor(max_targets, dtype=torch.float32, device=device)
+
+        return {
+            "task_embedding": task_embeddings,
+            "goal": goal_tensor,
+            "class": class_tensor,
+            "max_targets": max_tensor
+        }
+
+    train_dict = process_dataset(train_data)
+    test_dict = process_dataset(test_data)
+
+    return train_dict, test_dict
+
 
 
