@@ -15,8 +15,8 @@ genai.configure(api_key=API_KEY)
 model = "models/gemini-embedding-exp-03-07"
 
 # File paths
-input_file = 'sentences/gemini_patch_dataset_multi_target_color_medium.json'
-output_file = 'data/language_data_complete_multi_target_color_medium.json'
+input_file = 'sentences/gemini_patch_dataset_multi_target_color_scale_confidence.json'
+output_file = 'data/language_data_complete_multi_target_color_scale_confidence.json'
 device = "mps"
 
 def get_resume_index(output_file):
@@ -39,7 +39,7 @@ def gemini_llm(start_index=0):
         for i in tqdm(range(start_index, len(data)), desc="Adding embeddings"):
             item = data[i]
             
-            time.sleep(0.75)
+            time.sleep(0.7)
 
             if 'gemini_response' in item:
                 result = genai.embed_content(
@@ -135,7 +135,7 @@ def fine_tuned_llm(input_file, output_file):
 
     print(f"Conversion complete. Results saved to {output_file}")
     
-# start_index = get_resume_index(output_file)
-# gemini_llm(start_index=start_index)
+#start_index = get_resume_index(output_file)
+#gemini_llm(start_index=start_index)
 predtrained_llm()
             

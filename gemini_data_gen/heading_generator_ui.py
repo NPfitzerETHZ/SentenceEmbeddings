@@ -5,6 +5,9 @@ import random
 from io import BytesIO
 from PIL import Image
 from google import genai
+import sys 
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) 
 from api_keys import GEMINI_API_KEY
 
 # Set your Gemini API key
@@ -62,9 +65,9 @@ danger_zone_terms = ["danger zone", "danger region", "hot zone", "hot region", "
 # Parameters
 grid_size = 9
 min_patch_size = 2
-max_patch_size = 5
+max_patch_size = 15
 min_std = 0.1
-max_std = 1.5
+max_std = 2
 max_num_patches = 1
 multipatch_prob = 0.5
 no_patch_prob = 0.0
@@ -423,23 +426,47 @@ def plot_grid_with_rgb(grid, rgb):
     return buf
 
 
+import random
+from PIL import Image
+
 def describe_image(image_buf, color_name):
-    
     num_targets = random.randint(1, 5)
     plural = "s" if num_targets > 1 else ""
+
+    # Style/personal tone variation
+    tone_style = random.choice([
+        "Give a terse and tactical report, like a military commander.",
+        "Use a friendly and encouraging tone, as if speaking to junior robots.",
+        "Use formal and technical language, suitable for an engineering briefing.",
+        "Speak like a seasoned explorer guiding a mission through uncertain terrain."
+    ])
     
-    prompt = f"""You are leading a team of robots and you need to help them find {num_targets} target{plural}.
-    The image is a simplification of the environment, showing a rough estimate of where the team should look. It does not show the targets, rather a region of high interest.
-    Guide the team and describe the location and size of the {color_name} region with respect to the environment. The more precise you are, the better chance they have to find it.
-    Use sentences and be precise. The color and number of targets must be part of the instruction.
-    """
-    if random.random() < 0.5:
-        prompt += f"""For the target use the term {random.choice(target_terms)}.
-    For the exploration area use the term {random.choice(environment_terms)}.
-    For the location of each patch use the following adjectives: {random.choice(list(direction_terms.values()))}.
-    For the size of each patch use at least one of the following adjectives: {random.choice(list(size_terms.values()))}.
-    Be creative in how you address the team.
-    """
+    confidence_level = random.choice([
+        "very confident about the likely location of the targets",
+        "reasonably confident about the general area but unsure of the exact spot",
+        "uncertain and relying on sparse clues to guess the location"
+    ])
+
+    prompt = f"""
+    You are leading a team of autonomous robots tasked with finding {num_targets} target{plural}.
+    The image below represents a simplified map of the environment. It highlights a **{color_name}** region of interest — this region does **not** show the targets directly but suggests where they are likely located.
+
+    Your mission:
+    - Clearly describe the **location** of the {color_name} region in relation to the environment. Use spatial terms like top-left, center, or along the lower edge.
+    - Estimate the **size** of the {color_name} region. Use either qualitative terms (e.g., very small, large) or quantitative ones (e.g., ~18% of the map area).
+    - Mention the **color and number of targets** as part of the instruction.
+    - Provide an assessment of your **confidence** in the region as a likely location for the targets. You are {confidence_level}.
+
+    {tone_style}
+
+    Do not use any formatting such as bold or italics. Write your response as plain text sentences only.
+
+    Before finalizing your response, make sure your instruction:
+    - Includes the color of the region.
+    - Mentions the number of targets.
+    - Clearly identifies the region’s **location** and **size**.
+    - Uses natural, full sentences.
+        """
 
     img = Image.open(image_buf)
     response = genai_client.models.generate_content(
@@ -447,6 +474,8 @@ def describe_image(image_buf, color_name):
         contents=[prompt, img]
     )
     return response.text
+
+
 
 # prompt = f"""You are leading a team of robots.
 #     Describe the location and size of each {objective} patch with respect to the environment.

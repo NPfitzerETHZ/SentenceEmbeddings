@@ -8,7 +8,7 @@ import numpy as np
 
 # Set device
 device = "mps" if torch.backends.mps.is_available() else "cpu"
-output_grid_dim = 5
+output_grid_dim = 10
 
 # Load sentence transformer
 llm = SentenceTransformer('thenlper/gte-large', device=device)
@@ -46,46 +46,59 @@ llm = SentenceTransformer('thenlper/gte-large', device=device)
 #         return self.l3(x)
     
 
-class Decoder(nn.Module):
-    def __init__(self, emb_size, out_size):
-        super(Decoder, self).__init__()
-        hidden_size = 256
-        self.l0 = nn.Linear(emb_size, hidden_size)
-        self.l1 = nn.Linear(hidden_size, hidden_size)
-        #self.l2 = nn.Linear(hidden_size, hidden_size)
-        #self.l3 = nn.Linear(hidden_size, out_size)
-        self.l2 = nn.Linear(hidden_size, out_size)
-        self.relu = nn.ReLU()
+# class Decoder(nn.Module):
+#     def __init__(self, emb_size, out_size):
+#         super(Decoder, self).__init__()
+#         hidden_size = 256
+#         self.l0 = nn.Linear(emb_size, hidden_size)
+#         self.l1 = nn.Linear(hidden_size, hidden_size)
+#         #self.l2 = nn.Linear(hidden_size, hidden_size)
+#         #self.l3 = nn.Linear(hidden_size, out_size)
+#         self.l2 = nn.Linear(hidden_size, out_size)
+#         self.relu = nn.ReLU()
 
-    def forward(self, embed):
-        x = self.relu(self.l0(embed))
-        x = self.relu(self.l1(x))
-        #x = self.relu(self.l2(x))
-        return torch.tanh(self.l2(x))
+#     def forward(self, embed):
+#         x = self.relu(self.l0(embed))
+#         x = self.relu(self.l1(x))
+#         #x = self.relu(self.l2(x))
+#         return torch.tanh(self.l2(x))
     
-#MLP on sterroids
-class Decoder_boost(nn.Module):
+# #MLP on sterroids
+# class Decoder_boost(nn.Module):
+#     def __init__(self, emb_size, out_size, hidden_size=256):
+#         super().__init__()
+#         self.norm_input = nn.LayerNorm(emb_size)
+#         self.l0 = nn.Linear(emb_size, hidden_size)
+#         self.l1 = nn.Linear(hidden_size, hidden_size)
+#         self.l2 = nn.Linear(hidden_size, out_size)
+#         self.norm_hidden = nn.LayerNorm(hidden_size)
+#         self.act = nn.LeakyReLU(0.1)
+#         self.dropout = nn.Dropout(0.3)
+
+#     def forward(self, x):
+#         x = self.norm_input(x)
+#         x = self.dropout(self.act(self.l0(x)))
+#         x = self.norm_hidden(x)
+#         x = self.dropout(self.act(self.l1(x)))
+#         return torch.tanh(self.l2(x))
+
+class Decoder(nn.Module):
     def __init__(self, emb_size, out_size, hidden_size=256):
         super().__init__()
         self.norm_input = nn.LayerNorm(emb_size)
         self.l0 = nn.Linear(emb_size, hidden_size)
-        self.l1 = nn.Linear(hidden_size, hidden_size)
-        self.l2 = nn.Linear(hidden_size, out_size)
-        self.norm_hidden = nn.LayerNorm(hidden_size)
-        self.act = nn.LeakyReLU(0.1)
+        self.l1 = nn.Linear(hidden_size, out_size)
+        self.act = nn.ReLU()
         self.dropout = nn.Dropout(0.3)
 
     def forward(self, x):
-        x = self.norm_input(x)
-        x = self.dropout(self.act(self.l0(x)))
-        x = self.norm_hidden(x)
-        x = self.dropout(self.act(self.l1(x)))
-        return torch.tanh(self.l2(x))
+        x = self.act(self.l0(x))
+        return torch.sigmoid(self.l1(x))
 
 # Load the trained decoder model
-model_path = "decoders/llm0_decoder_model_grid_single_target.pth"  # Update this path if needed
+model_path = "decoders/llm0_decoder_model_grid_single_target_confidence.pth"  # Update this path if needed
 embedding_size = llm.encode(["dummy"], device=device).shape[1]
-model = Decoder_boost(embedding_size, output_grid_dim*output_grid_dim).to(device)
+model = Decoder(embedding_size, output_grid_dim*output_grid_dim).to(device)
 model.load_state_dict(torch.load(model_path, map_location=device))
 model.eval()
 

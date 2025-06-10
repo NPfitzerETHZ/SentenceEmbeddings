@@ -1,5 +1,7 @@
 import torch
 import google.generativeai as genai
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from api_keys import GEMINI_API_KEY
 
 # Configure Google AI API

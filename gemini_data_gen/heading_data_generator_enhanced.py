@@ -34,6 +34,9 @@ multipatch_prob = 0.5
 no_patch_prob = 0.0
 danger_zone_prob = 0.0
 BATCH_SIZE = 1
+
+FULL_EXPLORE_SAMPLE_PROB = 0.05  # 5 % of the time: empty grid + “explore the entire space”
+
 # ========================== Vocabulary ==========================
 
 color_dict = {
@@ -317,6 +320,24 @@ def describe_image(image_buf, color_name, num_targets, confidence):
     )
     return response.text
 
+def gen_explore_sentence():
+    """
+    Ask Gemini for a single, high-level instruction that does NOT point to any
+    specific region or target – just a generic exploration order.
+    """
+    prompt = (
+        "You are leading autonomous robots through an unknown environment. "
+        "Give ONE plain-text instruction that tells them to explore the entire "
+        "area thoroughly without referencing any specific colour, region or target."
+    )
+    # Empty 10 × 10 grid – Gemini still expects an image, so give it one
+    empty_buf = plot_grid(np.zeros((grid_size, grid_size), dtype=np.int8))
+
+    response = genai_client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=[prompt, Image.open(empty_buf)]
+    )
+    return response.text.strip()
 
 def describe_image_with_timeout(image_buf, timeout=10):
     image_buf.seek(0)
@@ -359,14 +380,32 @@ def danger_zones():
 
     with open(output_file, "a") as f:
         for i in tqdm(range(start_index, NUM_DATA_TARGETS), desc="Generating Data"):
-            grid, num_patches, target_flag = generate_grid_and_patches()
-            image_buf = plot_grid(grid if target_flag else -grid)
-            description = describe_image_with_timeout(image_buf, num_patches, target_flag)
+            if random.random() < FULL_EXPLORE_SAMPLE_PROB:
+                # ----- (A)  BLANK GRID  +  GEMINI “EXPLORE” SENTENCE -----
+                grid = np.zeros((grid_size, grid_size), dtype=np.int8)
+                description = gen_explore_sentence()       # Gemini call above
+                color_class = -1                           # sentinel
+                max_targets = 0
+                confidence = -1
 
-            if description is None:
-                continue
+            else:
+                # ----- (B)  REGULAR TARGET/COLOUR SAMPLE -----------------
+                grid, _, _, color_info = generate_grid_and_patches()
+                image_buf = plot_grid_with_rgb(grid, color_info[0]["rgb"])
+                description = describe_image_with_timeout(
+                    image_buf,
+                    color_info[0]["name"],
+                    color_info[0]["num_targets"],
+                    color_info[0]["confidence"]
+                )
+                if description is None:
+                    continue
 
-            time.sleep(API_DELAY_SECONDS)
+                color_class = color_info[0]["index"]
+                max_targets = color_info[0]["num_targets"]
+                confidence = color_info[0]["confidence"]
+
+                time.sleep(API_DELAY_SECONDS) 
 
             buffer.append({
                 "grid": grid.flatten().tolist(),
@@ -445,20 +484,38 @@ def target_and_color():
 
     with open(output_file, "a") as f:
         for i in tqdm(range(start_index, NUM_DATA_TARGETS), desc="Generating Data"):
-            grid, _ , _ , color_info  = generate_grid_and_patches()
-            image_buf = plot_grid_with_rgb(grid, color_info[0]["rgb"])
-            description = describe_image_with_timeout(image_buf, color_info[0]["name"], color_info[0]["num_targets"], color_info[0]["confidence"])
+            if random.random() < FULL_EXPLORE_SAMPLE_PROB:
+                # ----- (A)  BLANK GRID  +  GEMINI “EXPLORE” SENTENCE -----
+                grid = np.zeros((grid_size, grid_size), dtype=np.int8)
+                description = gen_explore_sentence()       # Gemini call above
+                color_class = -1                           # sentinel
+                max_targets = -1
+                confidence = -1
 
-            if description is None:
-                continue
+            else:
+                # ----- (B)  REGULAR TARGET/COLOUR SAMPLE -----------------
+                grid, _, _, color_info = generate_grid_and_patches()
+                image_buf = plot_grid_with_rgb(grid, color_info[0]["rgb"])
+                description = describe_image_with_timeout(
+                    image_buf,
+                    color_info[0]["name"],
+                    color_info[0]["num_targets"],
+                    color_info[0]["confidence"]
+                )
+                if description is None:
+                    continue
 
-            time.sleep(API_DELAY_SECONDS)
+                color_class = color_info[0]["index"]
+                max_targets = color_info[0]["num_targets"]
+                confidence = color_info[0]["confidence"]
+
+                time.sleep(API_DELAY_SECONDS) 
 
             buffer.append({
                 "grid": grid.flatten().tolist(),
-                "class": color_info[0]["index"],
-                "max_targets": color_info[0]["num_targets"],
-                "confidence": color_info[0]["confidence"],
+                "class": color_class,
+                "max_targets": max_targets,
+                "confidence": confidence,
                 "gemini_response": description
             })
 
@@ -477,35 +534,3 @@ def target_and_color():
         json.dump(data, f, indent=2)
         
 target_and_color()
-
-# Old prompts
-#==================
-if False:
-    
-    prompt = f"""You are leading a team of robots.
-    Describe the location and size of each patch with respect to the environment. Red patch is the target. Blue patch is a danger zone. Use sentences. Do not mention color or the grid.
-    The target patch must be reached". "The danger patch must be avoided.
-    """
-    if random.random() < 0.5:
-        prompt += f"""For the target use the term {random.choice(target_terms)}.
-    For the danger zone use the term {random.choice(danger_zone_terms)}.
-    For the exploration area use the term {random.choice(environment_terms)}.
-    For the location of each patch use the following adjectives: {random.choice(list(direction_terms.values()))}.
-    For the size of each patch use at least one of the following adjectives: {random.choice(list(size_terms.values()))}.
-    """
-    
-    objective = "target" if target_flag else "danger"
-    term = random.choice(target_terms if target_flag else danger_zone_terms)
-
-    prompt = f"""You are leading a team of robots.
-    Describe the location and size of each {objective} patch with respect to the environment.
-    There is {num_patches} {objective} patch{'es' if num_patches > 1 else ''}. Use sentences. Do not mention color or the grid.
-    """
-    if random.random() < 0.5:
-        prompt += f"""Use the term "{term}".
-        Refer to the environment as "{random.choice(environment_terms)}".
-        Use directional terms like {random.choice(list(direction_terms.values()))}.
-        Use size terms like {random.choice(list(size_terms.values()))}.
-        """
-    
-    
