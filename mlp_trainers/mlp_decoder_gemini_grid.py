@@ -14,7 +14,7 @@ llms = {
     SentenceTransformer('thenlper/gte-large'): "thenlper/gte-large"
 }
 
-json_data_file = "data/language_data_complete_multi_target_color_medium.json"
+json_data_file = "data/language_data_complete_target_scale.json"
 
 # Define the Decoder model in PyTorch
 # class Decoder(nn.Module):
@@ -54,9 +54,8 @@ json_data_file = "data/language_data_complete_multi_target_color_medium.json"
 #         return torch.tanh(self.l2(x))
 
 class Decoder(nn.Module):
-    def __init__(self, emb_size, out_size, hidden_size=256):
+    def __init__(self, emb_size, out_size, hidden_size=128):
         super().__init__()
-        self.norm_input = nn.LayerNorm(emb_size)
         self.l0 = nn.Linear(emb_size, hidden_size)
         self.l1 = nn.Linear(hidden_size, out_size)
         self.act = nn.ReLU()
@@ -64,13 +63,17 @@ class Decoder(nn.Module):
 
     def forward(self, x):
         x = self.act(self.l0(x))
-        return torch.tanh(self.l1(x))
+        return self.l1(x)
 
 
-# Define loss function
+# # Define loss function
+# def loss_fn(model, emb, goal):
+#     pred = model(emb)
+#     return torch.mean(torch.norm(pred - goal, dim=-1))
+bce_logits = nn.BCEWithLogitsLoss()
 def loss_fn(model, emb, goal):
     pred = model(emb)
-    return torch.mean(torch.norm(pred - goal, dim=-1))
+    return bce_logits(pred, goal)
 
 
 results = {}
@@ -79,7 +82,7 @@ patience_counter = 0
 for llm, llm_name in llms.items():
     wandb.init(project='grid_decoder_llm', name=llm_name)
     batch_size = 128
-    epochs = 1000
+    epochs = 3000
 
     train, test = collect_train_test_data_from_embeddings(json_path=json_data_file,train_ratio=0.8,test_ratio=0.2, device="mps")
 
@@ -118,7 +121,7 @@ for llm, llm_name in llms.items():
     
     results[llm_name] = best_val_loss
     wandb.finish()
-    torch.save(model.state_dict(), f"llm{m}_decoder_model_grid_single_target.pth")
+    torch.save(model.state_dict(), f"llm{m}_decoder_model_grid_scale.pth")
     m += 1
 
 print(results)

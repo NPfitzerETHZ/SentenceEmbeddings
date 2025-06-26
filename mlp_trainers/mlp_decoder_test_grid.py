@@ -83,9 +83,8 @@ llm = SentenceTransformer('thenlper/gte-large', device=device)
 #         return torch.tanh(self.l2(x))
 
 class Decoder(nn.Module):
-    def __init__(self, emb_size, out_size, hidden_size=256):
+    def __init__(self, emb_size, out_size, hidden_size=128):
         super().__init__()
-        self.norm_input = nn.LayerNorm(emb_size)
         self.l0 = nn.Linear(emb_size, hidden_size)
         self.l1 = nn.Linear(hidden_size, out_size)
         self.act = nn.ReLU()
@@ -96,7 +95,7 @@ class Decoder(nn.Module):
         return torch.sigmoid(self.l1(x))
 
 # Load the trained decoder model
-model_path = "decoders/llm0_decoder_model_grid_single_target_confidence.pth"  # Update this path if needed
+model_path = "decoders/llm0_decoder_model_grid_scale.pth"  # Update this path if needed
 embedding_size = llm.encode(["dummy"], device=device).shape[1]
 model = Decoder(embedding_size, output_grid_dim*output_grid_dim).to(device)
 model.load_state_dict(torch.load(model_path, map_location=device))
@@ -132,9 +131,21 @@ def predict():
 
     with torch.no_grad():
         embedding = torch.tensor(llm.encode([sentence]), device=device).squeeze(0)
-        prediction = model(embedding).cpu().numpy()
+        prediction = model(embedding).cpu()  # shape: (100,)
 
-    grid = prediction.reshape(output_grid_dim, output_grid_dim)
+        # Step 1: Min-max normalize to [0, 1]
+        min_val = prediction.min()
+        max_val = prediction.max()
+
+        # Step 2: Apply fixed threshold (e.g., 0.8)
+        threshold = 0.8 * (max_val - min_val) + min_val
+        above_thresh = prediction >= threshold
+
+        # Step 3: Subtract threshold *only* from values above it
+        rescaled = torch.zeros_like(prediction)
+        rescaled[above_thresh] = prediction[above_thresh]
+
+        grid = rescaled.reshape(output_grid_dim, output_grid_dim).numpy()
 
     # Clear entire figure
     fig.clf()
@@ -149,6 +160,22 @@ def predict():
 
     canvas.draw()
     result_var.set("Prediction completed and visualized.")
+
+
+    # Clear entire figure
+    fig.clf()
+
+    # Create fresh axes
+    ax = fig.add_subplot(111)
+    im = ax.imshow(grid, cmap='viridis')
+    ax.set_title(f"Decoder Output ({output_grid_dim}x{output_grid_dim} Grid)")
+
+    # Create a fresh colorbar
+    colorbar = fig.colorbar(im, ax=ax)
+
+    canvas.draw()
+    result_var.set("Prediction completed and visualized.")
+
 
 tk.Button(root, text="Get Decoder Output", command=predict).pack(pady=10)
 

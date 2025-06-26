@@ -11,6 +11,7 @@ from io import BytesIO
 from PIL import Image
 from tqdm import tqdm
 from google import genai
+from typing import Optional, Tuple
 
 import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -22,20 +23,18 @@ from api_keys import GEMINI_API_KEY
 genai_client = genai.Client(api_key=GEMINI_API_KEY)  # 🔐 Replace with your actual key
 
 # Dataset generation parameters
-NUM_DATA_TARGETS = 5000
+NUM_DATA_TARGETS = 1000
 API_DELAY_SECONDS = 0.
 grid_size = 10
-min_patch_size = 2
-max_patch_size = 20
-min_std = 0.1
-max_std = 2.0
+min_patch_size = 1
+max_patch_size = 25
+min_std = 0.05
+max_std = 5.0
 max_num_patches = 1
 multipatch_prob = 0.5
 no_patch_prob = 0.0
 danger_zone_prob = 0.0
 BATCH_SIZE = 1
-
-FULL_EXPLORE_SAMPLE_PROB = 0.05  # 5 % of the time: empty grid + “explore the entire space”
 
 # ========================== Vocabulary ==========================
 
@@ -93,7 +92,61 @@ target_terms = [
     "Destination", "Aim", "Spot", "Site", "Position", "Location", "Zone", "Subject", "Waypoint"
 ]
 
+confidence_txt = [
+    "very confident about the likely location of the targets",
+    "reasonably confident about the general area but unsure of the exact spot",
+    "uncertain and relying on sparse clues to guess the location"
+]
+
+tone_styles = [
+    "Give a terse and tactical report, like a military commander.",
+    "Use a friendly and encouraging tone, as if speaking to junior robots.",
+    "Use formal and technical language, suitable for an engineering briefing.",
+    "Speak like a seasoned explorer guiding a mission through uncertain terrain."
+]
+
+# ---------------- Vocabulary helper utilities ----------------
+
+def maybe_use_vocab(default_word: str, vocab_list: list, prob: float = 0.3) -> str:
+    """Return a random term from *vocab_list* with probability *prob*, otherwise *default_word*."""
+    return random.choice(vocab_list) if random.random() < prob else default_word
+
+# Pre‑baked synonym lists for the size buckets returned by *label_size*.
+size_synonyms = {
+    "very small": ["tiny", "miniature", "compact", "petite", "restricted"],
+    "small": ["small", "compact", "limited", "narrow", "modest"],
+    "medium-sized": ["medium", "average", "standard", "intermediate", "mid-sized", "midsize"],
+    "large": ["large", "wide", "broad", "extensive", "immense"],
+    "very large": ["very large", "vast", "enormous", "colossal", "immense", "expansive"]
+}
+
+def maybe_use_size_synonym(label: str, prob: float = 0.3) -> str:
+    """Return a size synonym for *label* with probability *prob*."""
+    return random.choice(size_synonyms[label]) if random.random() < prob else label
+
 # ========================== Utility Functions ==========================
+
+def label_size(ratio: float) -> str:
+    if ratio < 0.05:  return "very small"
+    if ratio < 0.10:  return "small"
+    if ratio < 0.15:  return "medium-sized"
+    if ratio < 0.20:  return "large"
+    return "very large"
+
+def compute_patch_centroid(grid: np.ndarray, patch_value: int = 1) -> Optional[Tuple[float, float]]:
+    """Return the (row, col) centroid of the cells matching *patch_value*.
+    If no such cells exist, return None."""
+    coords = np.argwhere(grid == patch_value)
+    if coords.size == 0:
+        return None
+    # Mean row, mean col – keep as float so we can convert to percentage later if needed
+    centroid = coords.mean(axis=0)
+    return tuple(centroid)
+
+# ----------------------------------------------------------------------
+# (The remainder of the file below this point is the original implementation,
+#  with *describe_image* updated to call the new vocabulary helpers.)
+# ----------------------------------------------------------------------
 
 def get_neighbors(cell, grid_size):
     r, c = cell
@@ -112,7 +165,7 @@ def generate_gaussian_prob_map(center, std_x, std_y, grid_size):
     gauss = np.exp(-((xx - cx) ** 2) / (2 * std_x ** 2) - ((yy - cy) ** 2) / (2 * std_y ** 2))
     return gauss / gauss.sum()
 
-def plot_grid(grid):
+def plot_grid(grid, rgb):
     fig, ax = plt.subplots()
     ax.imshow(grid, cmap='binary')
     ax.axis("off")
@@ -137,14 +190,13 @@ def plot_grid_with_rgb(grid, rgb):
     fig, ax = plt.subplots()
     ax.imshow(color_img)
     
-    grid_size = grid.shape[0]
-    ax.set_xticks(np.arange(grid_size))
-    ax.set_yticks(np.arange(grid_size))
-    #ax.grid(which='minor', color='black', linewidth=1)
+    grid_size_local = grid.shape[0]
+    ax.set_xticks(np.arange(grid_size_local))
+    ax.set_yticks(np.arange(grid_size_local))
     ax.tick_params(which='both', bottom=False, left=False, labelbottom=False, labelleft=False)
 
     # Add outer boundary rectangle
-    rect = Rectangle((-0.45,-0.45), grid_size-0.15, grid_size-0.1,
+    rect = Rectangle((-0.45,-0.45), grid_size_local-0.15, grid_size_local-0.1,
                      linewidth=2, edgecolor='black', facecolor='none')
     ax.add_patch(rect)
 
@@ -175,7 +227,8 @@ def plot_color_grid(grid):
 
 # ========================== Core Functions ==========================
 
-# This function generates target and danger patch pairs
+# (generate_grid_target_danger_pair & generate_grid_and_patches unchanged)
+
 def generate_grid_target_danger_pair():
     grid = np.zeros((grid_size, grid_size), dtype=np.int8)
     used_cells = set()
@@ -217,8 +270,6 @@ def generate_grid_target_danger_pair():
         
     return grid
     
-
-# This function generates either a set of danger zones or a set of target zones
 def generate_grid_and_patches():
     grid = np.zeros((grid_size, grid_size), dtype=np.int8)
     used_cells = set()
@@ -226,9 +277,7 @@ def generate_grid_and_patches():
     target_flag = random.random() > danger_zone_prob
     
     color_info = []
-    
-    num_targets = random.randint(1, 4)
-    confidence = random.randint(0, 2)
+    patch_sizes = []
 
     if random.random() > no_patch_prob:
         for patch_idx in range(max_num_patches):
@@ -236,7 +285,16 @@ def generate_grid_and_patches():
             color_name, _color_info = random.choice(list(color_dict.items()))
             color_index = _color_info["index"]
             _color = _color_info["rgb"]
-            color_info.append({"name":color_name,"index": color_index, "rgb": _color, "num_targets": num_targets, "confidence": confidence})
+            num_targets = random.randint(1, 5)
+            conf_level  = random.randint(0, 2)
+
+            color_info.append({
+                "name":  color_name,
+                "index": color_index,
+                "rgb":   _color,
+                "num_targets": num_targets,
+                "confidence":  conf_level
+            })
             
             if patch_idx == 0 or random.random() < multipatch_prob:
                 num_patches += 1
@@ -258,61 +316,137 @@ def generate_grid_and_patches():
                 target_size = random.randint(min_patch_size, max_patch_size)
 
                 while len(patch) < target_size and frontier:
+                    
                     probs = np.array([prob_map[r, c] if (r, c) not in used_cells else 0. for r, c in frontier])
                     if probs.sum() == 0: break
                     next_cell = random.choices(list(frontier), weights=probs, k=1)[0]
                     patch.add(next_cell)
                     frontier.remove(next_cell)
                     frontier.update({n for n in get_neighbors(next_cell, grid_size) if n not in patch and n not in used_cells})
+                patch_sizes.append(len(patch))
 
                 value = 1 if target_flag else -1
                 for r, c in patch:
                     grid[r, c] = value
                 used_cells.update(patch)
 
-    return grid, num_patches, target_flag, color_info
+    return grid, num_patches, target_flag, color_info, patch_sizes
 
-def describe_image(image_buf, color_name, num_targets, confidence):
-    num_targets = random.randint(1, 5)
-    plural = "s" if num_targets > 1 else ""
+# ----------------------------------------------------------------------
+# describe_image
+# ----------------------------------------------------------------------
 
-    # Style/personal tone variation
-    tone_style = random.choice([
-        "Give a terse and tactical report, like a military commander.",
-        "Use a friendly and encouraging tone, as if speaking to junior robots.",
-        "Use formal and technical language, suitable for an engineering briefing.",
-        "Speak like a seasoned explorer guiding a mission through uncertain terrain."
-    ])
-    
-    confidence_levels = [
-        "very confident about the likely location of the targets",
-        "reasonably confident about the general area but unsure of the exact spot",
-        "uncertain and relying on sparse clues to guess the location"
+def describe_image(
+    image_buf,
+    *,
+    grid_size: int,
+    patch_size: int,
+    color_name: Optional[str] = None,
+    num_targets: Optional[int] = None,
+    confidence: Optional[int] = None,
+    include_color: bool = True,
+    include_number: bool = True,
+    include_confidence: bool = True,
+    # 🆕 centroid options
+    patch_centroid: Optional[Tuple[float, float]] = None,
+    include_centroid: bool = False,
+    coordinate_format: str = "grid"  # "grid" | "percent"
+):
+    """
+    Generate a natural-language description of the region of interest.
+
+    *patch_centroid* – (row, col) floats in grid coordinates.
+    If *include_centroid* is True and *patch_centroid* is provided, a sentence indicating
+    the centroid location will be added to the prompt. If *coordinate_format* == "percent",
+    the centroid will be expressed as a percentage of the grid's height and width; otherwise
+    integer grid coordinates are used.
+    """
+
+    # ------------------- derive variable parts -------------------
+    size_ratio = patch_size / float(grid_size * grid_size)
+    qual_label = label_size(size_ratio)
+    display_label = maybe_use_size_synonym(qual_label, prob=0.4)
+    region_word = maybe_use_vocab("region", environment_terms, prob=0.5)
+
+
+    tgt_snip = "the flag"
+
+    opening = "You are leading a team of autonomous robots tasked with exploring and finding " + tgt_snip + "."
+
+    region_line = "The image below represents a simplified map of the environment."
+    if include_color and color_name:
+        region_line += f" It highlights a {color_name} {region_word} of interest"
+    else:
+        region_line += f" It highlights a {region_word} of interest"
+    region_line += f" — this {region_word} does not show the targets directly but suggests where they are likely located."
+
+    size_line = f"The {region_word} covers ≈ {size_ratio*100:.1f}% of the map, i.e. it is {display_label}."
+
+    # 🆕 Centroid line
+    centroid_line = ""
+    if include_centroid and patch_centroid is not None:
+        row, col = patch_centroid
+        if coordinate_format == "percent":
+            row_pct = (row / (grid_size - 1)) * 100
+            col_pct = (col / (grid_size - 1)) * 100
+            centroid_line = (
+                f"Its centroid lies roughly at ({row_pct:.1f}%, {col_pct:.1f}%) of the height and width respectively."
+            )
+        else:
+            centroid_line = f"Its centroid lies at grid coordinate ({int(round(row))}, {int(round(col))})."
+
+    # Confidence line
+    if include_confidence and confidence is not None:
+        conf_text = confidence_txt[confidence]
+        confidence_line = (
+            f"Provide an assessment of your confidence in the {region_word} as a likely location for the targets. "
+            f"You are {conf_text}."
+        )
+    else:
+        confidence_line = ""
+
+    # Mission bullet list
+    mission_items = [
+        f"Clearly describe the location of the {region_word} in relation to the environment. "
+        "Use spatial terms like top-left, south-east, center, or along the lower edge.",
+        f"Estimate the size of the {region_word} (you already know it is {display_label}; feel free to repeat or refine).",
     ]
-    
-    confidence_level = confidence_levels[confidence]
+    if include_number:
+        mission_items.append("Mention the number of targets.")
+    if include_color:
+        mission_items.append("Mention the color of the region.")
+    if include_centroid and patch_centroid is not None:
+        mission_items.append("Reference the centroid position you have been given.")
+    if include_confidence and confidence is not None:
+        mission_items.append("Provide a confidence assessment.")
 
-    prompt = f"""
-    You are leading a team of autonomous robots tasked with finding {num_targets} target{plural}.
-    The image below represents a simplified map of the environment. It highlights a **{color_name}** region of interest — this region does **not** show the targets directly but suggests where they are likely located.
+    mission_block = "- " + "\n- ".join(mission_items)
 
-    Your mission:
-    - Clearly describe the **location** of the {color_name} region in relation to the environment. Use spatial terms like top-left, center, or along the lower edge.
-    - Estimate the **size** of the {color_name} region. Use either qualitative terms (e.g., very small, large) or quantitative ones (e.g., ~18% of the map area).
-    - Mention the **color and number of targets** as part of the instruction.
-    - Provide an assessment of your **confidence** in the region as a likely location for the targets. You are {confidence_level}.
+    # Assemble full prompt
+    prompt_parts = [
+        opening,
+        region_line,
+        "• " + size_line,
+    ]
+    if centroid_line:
+        prompt_parts.append("• " + centroid_line)
 
-    {tone_style}
+    prompt_parts += [
+        "",
+        "Your mission:",
+        mission_block,
+        "",
+        random.choice(tone_styles),
+        "",
+        "Do not use any formatting such as bold or italics. Write your response as plain text sentences only. Be Brief",
+    ]
 
-    Do not use any formatting such as bold or italics. Write your response as plain text sentences only.
+    if confidence_line:
+        prompt_parts.append("\n" + confidence_line)
 
-    Before finalizing your response, make sure your instruction:
-    - Includes the color of the region.
-    - Mentions the number of targets.
-    - Clearly identifies the region’s **location** and **size**.
-    - Uses natural, full sentences.
-        """
+    prompt = "\n\n".join(prompt_parts)
 
+    # --------------- call the LLM / vision model ---------------
     img = Image.open(image_buf)
     response = genai_client.models.generate_content(
         model="gemini-2.0-flash",
@@ -320,43 +454,15 @@ def describe_image(image_buf, color_name, num_targets, confidence):
     )
     return response.text
 
-def gen_explore_sentence():
-    """
-    Ask Gemini for a single, high-level instruction that does NOT point to any
-    specific region or target – just a generic exploration order.
-    """
-    prompt = (
-        "You are leading autonomous robots through an unknown environment. "
-        "Give ONE plain-text instruction that tells them to explore the entire "
-        "area thoroughly without referencing any specific colour, region or target."
-    )
-    # Empty 10 × 10 grid – Gemini still expects an image, so give it one
-    empty_buf = plot_grid(np.zeros((grid_size, grid_size), dtype=np.int8))
+# (describe_image_with_timeout and the rest remain unchanged)
 
-    response = genai_client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=[prompt, Image.open(empty_buf)]
-    )
-    return response.text.strip()
-
-def describe_image_with_timeout(image_buf, timeout=10):
+def describe_image_with_timeout(image_buf, timeout=10, **describe_kwargs):
+    """Thin wrapper that enforces a time‑out around `describe_image()`."""
     image_buf.seek(0)
     buf_copy = BytesIO(image_buf.read())
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(describe_image, buf_copy)
-        try:
-            return future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            print("⚠️ Gemini took too long, skipping.")
-        except Exception as e:
-            print(f"⚠️ Gemini error: {e}")
-        return None
 
-def describe_image_with_timeout(image_buf, color_name, num_targets, confidence, timeout=10):
-    image_buf.seek(0)
-    buf_copy = BytesIO(image_buf.read())
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(describe_image, buf_copy, color_name, num_targets, confidence)
+        future = executor.submit(describe_image, buf_copy, **describe_kwargs)
         try:
             return future.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
@@ -366,9 +472,10 @@ def describe_image_with_timeout(image_buf, color_name, num_targets, confidence, 
         return None
 
 # ========================== Main Generation Loop ==========================
-def danger_zones():
-    output_file = "gemini_patch_dataset_grid_danger.jsonl"
-    json_output_file = "gemini_patch_dataset_grid_danger.json"
+
+def target_and_color():
+    output_file = "sequential_tasks/sentences/gemini_patch_dataset_exploration_scale.jsonl"
+    json_output_file = "sequential_tasks/sentences/gemini_patch_dataset_exploration_scale.json"
     start_index = 0
     buffer = []
 
@@ -379,89 +486,63 @@ def danger_zones():
             print(f"📂 Resuming from index {start_index}")
 
     with open(output_file, "a") as f:
+        
+        include_color = False
+        include_number = False
+        include_confidence = False
+        include_centroid = False
         for i in tqdm(range(start_index, NUM_DATA_TARGETS), desc="Generating Data"):
-            if random.random() < FULL_EXPLORE_SAMPLE_PROB:
-                # ----- (A)  BLANK GRID  +  GEMINI “EXPLORE” SENTENCE -----
-                grid = np.zeros((grid_size, grid_size), dtype=np.int8)
-                description = gen_explore_sentence()       # Gemini call above
-                color_class = -1                           # sentinel
-                max_targets = 0
-                confidence = -1
+            grid, _, _, color_info, patch_sizes = generate_grid_and_patches()
+            image_buf = plot_grid_with_rgb(grid, color_info[0]["rgb"])
+            patch_cells = patch_sizes[0]  # number of cells in the patch
 
-            else:
-                # ----- (B)  REGULAR TARGET/COLOUR SAMPLE -----------------
-                grid, _, _, color_info = generate_grid_and_patches()
-                image_buf = plot_grid_with_rgb(grid, color_info[0]["rgb"])
-                description = describe_image_with_timeout(
-                    image_buf,
-                    color_info[0]["name"],
-                    color_info[0]["num_targets"],
-                    color_info[0]["confidence"]
-                )
-                if description is None:
-                    continue
+            # 🆕 Centroid calculation
+            centroid = compute_patch_centroid(grid, patch_value=1)  # (row, col) or None
 
-                color_class = color_info[0]["index"]
-                max_targets = color_info[0]["num_targets"]
-                confidence = color_info[0]["confidence"]
-
-                time.sleep(API_DELAY_SECONDS) 
-
-            buffer.append({
-                "grid": grid.flatten().tolist(),
-                "gemini_response": description
-            })
-
-            if len(buffer) >= BATCH_SIZE:
-                for entry in buffer:
-                    f.write(json.dumps(entry) + "\n")
-                buffer.clear()
-
-        for entry in buffer:
-            f.write(json.dumps(entry) + "\n")
-
-    # Save full dataset as JSON for readability
-    with open(output_file) as f:
-        data = [json.loads(line) for line in f]
-    with open(json_output_file, "w") as f:
-        json.dump(data, f, indent=2)
-
-def target_danger_pairs():
-    
-    output_file = "gemini_patch_dataset_grid_target_danger.jsonl"
-    json_output_file = "gemini_patch_dataset_grid_target_danger.json"
-    start_index = 0
-    buffer = []
-
-    if os.path.exists(output_file):
-        with open(output_file, "r") as f:
-            existing_lines = f.readlines()
-            start_index = len(existing_lines)
-            print(f"📂 Resuming from index {start_index}")
-
-    with open(output_file, "a") as f:
-        for i in tqdm(range(start_index, NUM_DATA_TARGETS), desc="Generating Data"):
-            grid = generate_grid_target_danger_pair()
-            image_buf = plot_color_grid(grid)
-            description = describe_image_with_timeout(image_buf)
+            description = describe_image_with_timeout(
+                image_buf,
+                grid_size=grid_size,
+                patch_size=patch_cells,
+                color_name=color_info[0]["name"],
+                num_targets=color_info[0]["num_targets"],
+                confidence=color_info[0]["confidence"],
+                include_color=include_color,
+                include_number=include_number,
+                include_confidence=include_confidence,
+                include_centroid=include_centroid,
+                patch_centroid=centroid,        
+                coordinate_format="percent"      
+            )
 
             if description is None:
                 continue
 
             time.sleep(API_DELAY_SECONDS)
 
-            buffer.append({
+            entry = {
                 "grid": grid.flatten().tolist(),
-                "gemini_response": description
-            })
+                "response": description,
+            }
+            
+            if include_color:
+                entry["color"] = color_info[0]["index"]
+                
+            if include_number:
+                entry["num_targets"] = color_info[0]["num_targets"]
+            
+            if include_confidence:
+                entry["confidence"] = color_info[0]["confidence"]
+            
+        
+            buffer.append(entry)
 
             if len(buffer) >= BATCH_SIZE:
-                for entry in buffer:
-                    f.write(json.dumps(entry) + "\n")
+                for b in buffer:
+                    f.write(json.dumps(b) + "\n")
                 buffer.clear()
 
-        for entry in buffer:
-            f.write(json.dumps(entry) + "\n")
+        for b in buffer:
+            f.write(json.dumps(b) + "\n")
 
     # Save full dataset as JSON for readability
     with open(output_file) as f:
@@ -469,68 +550,5 @@ def target_danger_pairs():
     with open(json_output_file, "w") as f:
         json.dump(data, f, indent=2)
         
-def target_and_color():
-    
-    output_file = "sentences/gemini_patch_dataset_multi_target_color_scale_confidence.jsonl"
-    json_output_file = "sentences/gemini_patch_dataset_multi_target_color_scale_confidence.json"
-    start_index = 0
-    buffer = []
-
-    if os.path.exists(output_file):
-        with open(output_file, "r") as f:
-            existing_lines = f.readlines()
-            start_index = len(existing_lines)
-            print(f"📂 Resuming from index {start_index}")
-
-    with open(output_file, "a") as f:
-        for i in tqdm(range(start_index, NUM_DATA_TARGETS), desc="Generating Data"):
-            if random.random() < FULL_EXPLORE_SAMPLE_PROB:
-                # ----- (A)  BLANK GRID  +  GEMINI “EXPLORE” SENTENCE -----
-                grid = np.zeros((grid_size, grid_size), dtype=np.int8)
-                description = gen_explore_sentence()       # Gemini call above
-                color_class = -1                           # sentinel
-                max_targets = -1
-                confidence = -1
-
-            else:
-                # ----- (B)  REGULAR TARGET/COLOUR SAMPLE -----------------
-                grid, _, _, color_info = generate_grid_and_patches()
-                image_buf = plot_grid_with_rgb(grid, color_info[0]["rgb"])
-                description = describe_image_with_timeout(
-                    image_buf,
-                    color_info[0]["name"],
-                    color_info[0]["num_targets"],
-                    color_info[0]["confidence"]
-                )
-                if description is None:
-                    continue
-
-                color_class = color_info[0]["index"]
-                max_targets = color_info[0]["num_targets"]
-                confidence = color_info[0]["confidence"]
-
-                time.sleep(API_DELAY_SECONDS) 
-
-            buffer.append({
-                "grid": grid.flatten().tolist(),
-                "class": color_class,
-                "max_targets": max_targets,
-                "confidence": confidence,
-                "gemini_response": description
-            })
-
-            if len(buffer) >= BATCH_SIZE:
-                for entry in buffer:
-                    f.write(json.dumps(entry) + "\n")
-                buffer.clear()
-
-        for entry in buffer:
-            f.write(json.dumps(entry) + "\n")
-
-    # Save full dataset as JSON for readability
-    with open(output_file) as f:
-        data = [json.loads(line) for line in f]
-    with open(json_output_file, "w") as f:
-        json.dump(data, f, indent=2)
-        
-target_and_color()
+if __name__ == "__main__":
+    target_and_color()

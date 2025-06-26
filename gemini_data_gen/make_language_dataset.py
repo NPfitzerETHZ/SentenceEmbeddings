@@ -15,8 +15,8 @@ genai.configure(api_key=API_KEY)
 model = "models/gemini-embedding-exp-03-07"
 
 # File paths
-input_file = 'sentences/gemini_patch_dataset_multi_target_color_scale_confidence.json'
-output_file = 'data/language_data_complete_multi_target_color_scale_confidence.json'
+input_file = 'sentences/gemini_patch_dataset_target_scale_position.json'
+output_file = 'data/language_data_complete_target_scale_position.json'
 device = "mps"
 
 def get_resume_index(output_file):

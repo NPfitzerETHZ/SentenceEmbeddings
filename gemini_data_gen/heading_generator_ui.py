@@ -64,12 +64,12 @@ danger_zone_terms = ["danger zone", "danger region", "hot zone", "hot region", "
 
 # Parameters
 grid_size = 9
-min_patch_size = 2
-max_patch_size = 15
-min_std = 0.1
-max_std = 2
+min_patch_size = 1
+max_patch_size = 25
+min_std = 0.05
+max_std = 5
 max_num_patches = 1
-multipatch_prob = 0.5
+multipatch_prob = 0.0
 no_patch_prob = 0.0
 danger_zone_prob = 0.0
 
@@ -155,6 +155,7 @@ def generate_grid_one_target_and_one_danger():
         prob_map = generate_gaussian_prob_map(start, init_std_x, init_std_y, grid_size)
 
         patch = set([start])
+        patch_sizes = []
         frontier = set(get_neighbors(start, grid_size))
         target_size = random.randint(min_patch_size, max_patch_size)
 
@@ -167,6 +168,8 @@ def generate_grid_one_target_and_one_danger():
 
             patch.add(next_cell)
             frontier.remove(next_cell)
+            
+            patch_sizes.append(len(patch))
 
             for neighbor in get_neighbors(next_cell, grid_size):
                 if neighbor not in patch and neighbor not in used_cells:
@@ -191,7 +194,7 @@ def generate_grid_one_target_and_one_danger():
         patch_info["grid"].append((norm_center, norm_spread_x, norm_spread_y))
         patch_info["colors"] = color_info
 
-    return grid, patch_info, num_patches
+    return grid, patch_info, num_patches, patch_sizes
 
 def generate_grid_and_two_patches():
     
@@ -274,6 +277,7 @@ def generate_grid_and_patches():
     target_flag = random.random() > danger_zone_prob
     
     color_info = []
+    patch_sizes = []
 
     if random.random() > no_patch_prob:
         for patch_idx in range(max_num_patches):
@@ -303,19 +307,21 @@ def generate_grid_and_patches():
                 target_size = random.randint(min_patch_size, max_patch_size)
 
                 while len(patch) < target_size and frontier:
+                    
                     probs = np.array([prob_map[r, c] if (r, c) not in used_cells else 0. for r, c in frontier])
                     if probs.sum() == 0: break
                     next_cell = random.choices(list(frontier), weights=probs, k=1)[0]
                     patch.add(next_cell)
                     frontier.remove(next_cell)
                     frontier.update({n for n in get_neighbors(next_cell, grid_size) if n not in patch and n not in used_cells})
+                patch_sizes.append(len(patch))
 
                 value = 1 if target_flag else -1
                 for r, c in patch:
                     grid[r, c] = value
                 used_cells.update(patch)
 
-    return grid, num_patches, target_flag, color_info
+    return grid, num_patches, target_flag, color_info, patch_sizes
 
 # def generate_grid_and_two_patches():
 #     grid = np.ones((grid_size, grid_size, 3))
@@ -429,7 +435,7 @@ def plot_grid_with_rgb(grid, rgb):
 import random
 from PIL import Image
 
-def describe_image(image_buf, color_name):
+def describe_image(image_buf, color_name, size_ratio, qual_label):
     num_targets = random.randint(1, 5)
     plural = "s" if num_targets > 1 else ""
 
@@ -450,10 +456,12 @@ def describe_image(image_buf, color_name):
     prompt = f"""
     You are leading a team of autonomous robots tasked with finding {num_targets} target{plural}.
     The image below represents a simplified map of the environment. It highlights a **{color_name}** region of interest — this region does **not** show the targets directly but suggests where they are likely located.
+    
+    • The {color_name} region covers **≈ {size_ratio*100:.1f}% of the map**, i.e. it is {qual_label}.
 
     Your mission:
     - Clearly describe the **location** of the {color_name} region in relation to the environment. Use spatial terms like top-left, center, or along the lower edge.
-    - Estimate the **size** of the {color_name} region. Use either qualitative terms (e.g., very small, large) or quantitative ones (e.g., ~18% of the map area).
+    - Estimate the **size** of the {color_name} region (you already know it is {qual_label}; feel free to repeat or refine).
     - Mention the **color and number of targets** as part of the instruction.
     - Provide an assessment of your **confidence** in the region as a likely location for the targets. You are {confidence_level}.
 
@@ -493,7 +501,17 @@ st.title("🗺️ Random Map Generator with Gemini")
 st.write("Click the button to generate a new map and get a description of the red patch.")
 
 if st.button("Generate New Map"):
-    grid, _,_, color_info = generate_grid_and_patches()
+    grid, _,_, color_info, patch_sizes = generate_grid_and_patches()
+    first_patch_cells = patch_sizes[0]
+    size_ratio = first_patch_cells / (grid_size ** 2)
+    def label_size(ratio):
+        if ratio < 0.05:  return "very small"
+        if ratio < 0.10:  return "small"
+        if ratio < 0.15:  return "medium-sized"
+        if ratio < 0.20:  return "large"
+        return "very large"
+    print(first_patch_cells,grid_size, size_ratio)
+    qual_label = label_size(size_ratio)
     image_buf = plot_grid_with_rgb(grid,color_info[0]["rgb"])
     img = plot_grid(grid)
     st.image(image_buf, caption="Generated Map with Two Patches", use_container_width=True)
@@ -505,7 +523,10 @@ if st.button("Generate New Map"):
     #     st.markdown(f"- **Standard deviations** (normalized): σₓ = {norm_std_x:.2f}, σᵧ = {norm_std_y:.2f}")
 
     with st.spinner("Gemini is thinking..."):
-        description = describe_image(image_buf, color_info[0]["name"])
+        description = describe_image(image_buf,
+                                 color_info[0]["name"],
+                                 size_ratio,
+                                 qual_label)
     st.subheader("🔍 Gemini's Description:")
     st.write(description)
 
