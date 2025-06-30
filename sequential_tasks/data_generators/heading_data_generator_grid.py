@@ -24,7 +24,7 @@ genai_client = genai.Client(api_key=GEMINI_API_KEY)  # 🔐 Replace with your ac
 
 # Dataset generation parameters
 NUM_DATA_TARGETS = 1000
-API_DELAY_SECONDS = 0.
+API_DELAY_SECONDS = 0.0
 grid_size = 10
 min_patch_size = 1
 max_patch_size = 25

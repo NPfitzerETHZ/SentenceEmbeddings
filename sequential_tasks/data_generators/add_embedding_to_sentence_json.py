@@ -7,7 +7,7 @@ from api_keys import GEMINI_API_KEY
 # ── Config ─────────────────────────────────────────────────────────────
 genai.configure(api_key=GEMINI_API_KEY)
 MODEL_NAME   = "models/gemini-embedding-exp-03-07"
-INPUT_FILE   = "sequential_tasks/sentences/gemini_patch_dataset_target_scale.json"
+INPUT_FILE   = "sequential_tasks/sentences/gemini_patch_dataset_exploration_scale.json"
 OUTPUT_FILE  = "sequential_tasks/data/language_data_complete_exploration.json"
 
 # ── Recursive collector ────────────────────────────────────────────────
@@ -27,12 +27,6 @@ def collect(obj, sentences, owners, seen_ids):
         if "response" in obj and isinstance(obj["response"], str):
             if id(obj) not in seen_ids:            # avoid dup if same dict reached twice
                 sentences.append(obj["response"])
-                owners.append(obj)
-                seen_ids.add(id(obj))
-        
-        if "gemini_response" in obj and isinstance(obj["gemini_response"], str):
-            if id(obj) not in seen_ids:            # avoid dup if same dict reached twice
-                sentences.append(obj["gemini_response"])
                 owners.append(obj)
                 seen_ids.add(id(obj))
 
