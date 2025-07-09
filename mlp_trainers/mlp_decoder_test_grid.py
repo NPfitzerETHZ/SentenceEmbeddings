@@ -95,7 +95,7 @@ class Decoder(nn.Module):
         return torch.sigmoid(self.l1(x))
 
 # Load the trained decoder model
-model_path = "decoders/llm0_decoder_model_grid_scale.pth"  # Update this path if needed
+model_path = "decoders/llm0_decoder_model_grid_single_target_color_confidence.pth"  # Update this path if needed
 embedding_size = llm.encode(["dummy"], device=device).shape[1]
 model = Decoder(embedding_size, output_grid_dim*output_grid_dim).to(device)
 model.load_state_dict(torch.load(model_path, map_location=device))

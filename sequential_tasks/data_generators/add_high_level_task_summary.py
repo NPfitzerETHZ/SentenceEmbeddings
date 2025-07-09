@@ -1,11 +1,7 @@
 #!/usr/bin/env python
 """
-summarise_seq_with_gemini_stream.py
------------------------------------
-• Streams one sequence-object at a time from EXTENDED_JSON
-• Uses Gemini Flash 2.0 to generate a ONE-sentence summary of its responses
-• Streams the augmented object straight into OUTPUT_JSON (an array)
-  so memory usage stays almost constant.
+Summarize sequences from multiple JSON files using Gemini and Sentence-BERT embeddings,
+and merge them into a single JSON output file with minimal memory footprint.
 
 Set GOOGLE_API_KEY in your environment.
 
@@ -36,105 +32,109 @@ from api_keys import GEMINI_API_KEY  # noqa: E402
 # Gemini API Key
 genai_client = genai.Client(api_key=GEMINI_API_KEY)  # 🔐 Replace with your actual key
 
-# ─────────────── CONFIG ─────────────── #
-EXTENDED_JSON = Path("sequential_tasks/data/dataset_no_summary_flag_home.json")  # <- input (large)
-OUTPUT_JSON = Path("sequential_tasks/data/dataset_full.json")  # <- output
+# Input files
+INPUT_FILES = [
+    (Path("sequential_tasks/data/dataset_no_summary_flag_home.json"), "FLAG_HOME"),
+    (Path("sequential_tasks/data/dataset_no_summary_defend.json"), "DEFEND")
+]
+
+# Output file
+OUTPUT_JSON = Path("sequential_tasks/data/dataset_full.json")
+
 MODEL_NAME = "gemini-2.0-flash"
-TEMP = 0.2  # lower = steadier summaries
-PRINT_EVERY = 100  # heartbeat cadence (in items)
-# ─────────────────────────────────────── #
+TEMP = 0.2
+PRINT_EVERY = 100
 
-PROMPT_TMPL = textwrap.dedent(
-    """\
-    You are leading a team of robots in  a capture the flag mission. Your team must find the flag and then return to base.    
-    Write ONE sentence summarising the sequence of tasks. Ignore repetitions. Do **not** add anything else. The task sequence might mention an area of interest for the flag location.
-    TASK SEQUENCE:
-    {joined}
-    """
-)
+PROMPTS = {
+    "FLAG_HOME": textwrap.dedent("""
+        You are leading a team of robots in a capture the flag mission. Your team must find the flag and then return to base.
+        Write ONE sentence summarising the sequence of tasks. Ignore repetitions. Do **not** add anything else. The task sequence might mention an area of interest for the flag location.
+        TASK SEQUENCE:
+        {joined}
+    """),
 
-# Sentence-BERT for embeddings
+    "DEFEND": textwrap.dedent("""
+        You are leading a team of robots in a capture the flag mission. Your team must find the flag and then defend it.
+        Write ONE sentence summarising the sequence of tasks. Ignore repetitions. Do **not** add anything else. The task sequence might mention an area of interest for the flag location.
+        TASK SEQUENCE:
+        {joined}
+    """)
+}
+
 llm = SentenceTransformer("thenlper/gte-large")
 
+MAX_PROMPT_CHARS = 24000  # safe limit for Gemini Flash 2.0 prompt input
 
-# ==================================================================
-# Helper functions
-# ==================================================================
+def one_sentence_summary(responses: List[str], prompt_tmpl: str) -> str:
+    
+    bullet_responses = [f"- {r}" for r in responses]
+    joined = "\n".join(bullet_responses)
 
-def one_sentence_summary(responses: List[str]) -> str:
-    """Return a single-sentence Gemini summary for *responses*."""
-    prompt = PROMPT_TMPL.format(joined="\n".join(f"- {r}" for r in responses))
+    # Truncate if too long
+    base_prompt = prompt_tmpl.format(joined="{joined}")
+    max_joined_chars = MAX_PROMPT_CHARS - len(base_prompt.format(joined=""))
+    
+    if len(joined) > max_joined_chars:
+        # Truncate from the start (keep latest instructions, which are likely most relevant)
+        truncated = joined[-max_joined_chars:]
+        # Ensure we don't cut in the middle of a bullet
+        truncated = "\n".join(truncated.split("\n")[1:])
+    else:
+        truncated = joined
+
+    prompt = prompt_tmpl.format(joined=truncated)
+    print(prompt)
     response = genai_client.models.generate_content(
         model=MODEL_NAME,
         contents=[prompt],
     )
     return response.text
 
-
-# ==================================================================
-# Main streaming pipeline (with live progress reporting)
-# ==================================================================
-
-def stream_process() -> None:
-    """Stream-process EXTENDED_JSON → OUTPUT_JSON with minimal RAM and show progress."""
-
-    # Ensure output directory exists
+# Main streaming pipeline
+def stream_process():
     OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
 
     start_ts = time.time()
     processed = 0
 
-    with EXTENDED_JSON.open("rb") as src, OUTPUT_JSON.open("w", encoding="utf-8") as dst:
-        # Open JSON array
+    with OUTPUT_JSON.open("w", encoding="utf-8") as dst:
         dst.write("[\n")
-        first = True
-        last = False
+        first_entry = True
 
-        # Stream top-level array members
-        items = ijson.items(src, "item")
-        tot = 1000 
-        for idx, seq in enumerate(tqdm(items, desc="Summaries", unit="seq")):
-            
-            processed += 1
-            if idx == tot - 1:
-                last = True
+        for input_file, prompt_key in INPUT_FILES:
+            prompt_template = PROMPTS[prompt_key]
 
-            if "responses" not in seq:
-                raise ValueError(f"Object {idx} missing 'responses' key")
+            with input_file.open("rb") as src:
+                items = ijson.items(src, "item")
 
-            # === summarise & embed ===
-            sentence = one_sentence_summary(seq["responses"])
-            seq["summary"] = sentence
-            seq["y"] = llm.encode(sentence, convert_to_numpy=True).tolist()
-            seq["h"] = [[float(x) for x in row] for row in seq["embeddings"]]
+                for seq in tqdm(items, desc=f"Summarizing {input_file.name}", unit="seq"):
+                    if "responses" not in seq:
+                        raise ValueError(f"Object missing 'responses' key")
 
-            # --- drop the raw embeddings now that we've copied what we need ---
-            seq.pop("embeddings", None)
+                    sentence = one_sentence_summary(seq["responses"], prompt_template)
+                    seq["summary"] = sentence
+                    seq["y"] = llm.encode(sentence, convert_to_numpy=True).tolist()
+                    seq["h"] = [[float(x) for x in row] for row in seq["embeddings"]]
+                    seq.pop("embeddings", None)
 
-            json.dump(seq, dst, ensure_ascii=False, indent=2)
-            
-            # Comma management inside output array
-            if not first and not last:
-                dst.write(",\n")
-            first = False
+                    if not first_entry:
+                        dst.write(",\n")
+                    else:
+                        first_entry = False
 
-            # ─── heartbeat ───
-            if processed % PRINT_EVERY == 0:
-                elapsed = time.time() - start_ts
-                print(f"[{processed}] processed – elapsed {elapsed:.1f}s")
+                    json.dump(seq, dst, ensure_ascii=False, indent=2)
 
-        # Close JSON array
+                    processed += 1
+                    if processed % PRINT_EVERY == 0:
+                        elapsed = time.time() - start_ts
+                        print(f"[{processed}] processed – elapsed {elapsed:.1f}s")
+
         dst.write("\n]\n")
 
-    # Final run summary
     elapsed = time.time() - start_ts
     print(f"\n[INFO] Finished – wrote {processed} summaries to {OUTPUT_JSON.resolve()}")
     print(f"[INFO] Total time: {elapsed:.1f}s | Avg/item: {elapsed / processed:.2f}s")
 
-
-# ==================================================================
 # Entrypoint
-# ==================================================================
-
 if __name__ == "__main__":
     stream_process()

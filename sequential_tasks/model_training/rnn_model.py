@@ -39,7 +39,8 @@ from torch.utils.data import DataLoader, Dataset, random_split
 ###############################################################################
 # Constants – unchanged
 ###############################################################################
-MAX_SEQ_LEN = 10
+
+MAX_SEQ_LEN = 8
 
 ###############################################################################
 # Dataset + DataLoader helpers – identical to v1 (see comments there)
@@ -85,11 +86,8 @@ class EventSequenceDataset(Dataset):
             e = torch.tensor(s[e_key], dtype=torch.float32)
             h = torch.tensor(s["h"], dtype=torch.float32)
             y = torch.tensor(s["y"], dtype=torch.float32)
-            if y.ndim != 1:
-                raise ValueError("'y' must be 1-D vector")
-            label = torch.tensor(float(s["success"]), dtype=torch.float32)
-
-            self.samples.append({"e": e, "y": y, "h": h, "label": label})
+            state_label = torch.tensor(s["label"], dtype=torch.float32)
+            self.samples.append({"e": e, "y": y, "h": h, "label": state_label})
 
     @classmethod
     def from_json(cls, path: str | pathlib.Path) -> "EventSequenceDataset":
@@ -111,25 +109,27 @@ class EventSequenceDataset(Dataset):
         max_len = MAX_SEQ_LEN
         event_dim = batch[0]["e"].size(1)
         h_dim = batch[0]["h"].size(1)
+        label_dim = batch[0]["label"].size(1)
 
         e_out, h_out, y_out, labels = [], [], [], []
         for s in batch:
             T = s["e"].size(0)
             pad_e = torch.zeros((max_len - T, event_dim))
             pad_h = torch.zeros((max_len - T, h_dim))
+            pad_label = torch.zeros((max_len - T,label_dim))
 
             e_out.append(torch.cat([s["e"], pad_e]))
             h_out.append(torch.cat([s["h"], pad_h]))
             y_rep = s["y"].unsqueeze(0).expand(max_len, -1)
             y_out.append(y_rep)
-            labels.append(s["label"])
+            labels.append(torch.cat([s["label"], pad_label]))
 
         return {
             "e": torch.stack(e_out),
             "h": torch.stack(h_out),
             "y": torch.stack(y_out),
-            "lengths": lengths,
             "label": torch.stack(labels),
+            "lengths": lengths
         }
 
 ###############################################################################
@@ -144,38 +144,53 @@ class EventRNN(pl.LightningModule):
         *,
         event_dim: int,
         y_dim: int,
-        h_dim: int,
+        latent_dim: int,
+        state_dim: int,
+        input_dim: int,
         num_layers: int = 1,
-        dropout: float = 0.0,
         lr: float = 1e-4,
         cls_loss_weight: float = 1.0,
-        recon_loss: str = "mse",
+        recon_loss: str = "cosine",
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
 
-        D = h_dim  # hidden size now equals target size
+        D = latent_dim  # hidden size now equals target size
+        I = input_dim
 
         # ─── Embeddings ──────────────────────────────────────────────
-        self.e_proj = nn.Linear(event_dim, D)
-        self.y_proj = nn.Linear(y_dim, D) if y_dim != D else nn.Identity()
-        self.h_proj = nn.Identity()  # no change in dimensionality
-        self.fuse = nn.Linear(3 * D, D)
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.e_proj = nn.Linear(event_dim, I)
+        self.gamma = nn.Linear(y_dim, I)
+        self.beta = nn.Linear(y_dim, I)
+        hidden_dim = max(D // 2, 4)
+        self.y_proj = nn.Sequential(
+            nn.Linear(y_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, I),
+        )
+        # self.h_proj = nn.Identity()  # no change in dimensionality
+        # self.fuse = nn.Linear(2 * I, I)
 
         # ─── GRU stack ───────────────────────────────────────────────
         if num_layers == 1:
-            self.rnn = nn.GRUCell(D, D)
+            self.rnn = nn.GRUCell(2*I, D)
         else:
-            self.rnn = nn.GRU(D, D, num_layers=num_layers, batch_first=True)
+            self.rnn = nn.GRU(I, D, num_layers=num_layers, batch_first=True)
             # we will still step manually to keep parity with TBPTT logic
 
         # ─── Classification head ────────────────────────────────────
         hidden_dim = max(D // 2, 4)
-        self.cls_head = nn.Sequential(
+        self.state_head = nn.Sequential(
+            nn.Linear(D + 2*I, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, state_dim),
+        )
+        self.recon_head = nn.Sequential(
             nn.Linear(D, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, 1),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, D),
         )
 
         self.recon_loss = recon_loss.lower()
@@ -186,51 +201,89 @@ class EventRNN(pl.LightningModule):
         self.lr = lr
 
     # ------------------------------------------------------------------
-    def _prepare_step(self, e_t: Tensor, y_t: Tensor, h_prev: Tensor) -> Tensor:
-        emb_e = self.e_proj(e_t)
-        emb_y = self.y_proj(y_t)
-        fused = self.fuse(torch.cat([emb_e, emb_y, h_prev], dim=-1))
-        return self.dropout(fused)
+    def _prepare_step(self, e: Tensor, y: Tensor) -> Tensor:
+        emb_e = self.e_proj(e)  # (B, T, I)          
+        gamma = self.gamma(y)
+        beta = self.beta(y)
+        return gamma * emb_e + beta 
+
 
     # ------------------------------------------------------------------
-    def _rollout(self, e: Tensor, y: Tensor) -> Tensor:
+    def _rollout(self, e: Tensor, y: Tensor, lengths: Tensor) -> Tensor:
         B, T, _ = e.shape
-        D = self.hparams.h_dim
+        D = self.hparams.latent_dim
+        L = self.hparams.num_layers
 
-        preds: List[Tensor] = []
-        h = e.new_zeros(B, D)  # h₀ = 0
 
-        for t in range(T):
-            fused = self._prepare_step(e[:, t], y[:, t], h.detach())
-            h = self.rnn(fused, h) if isinstance(self.rnn, nn.GRUCell) else self.rnn(fused.unsqueeze(1), h.unsqueeze(0))[0].squeeze(1)
-            preds.append(h)
+        fused = torch.cat([self.e_proj(e),self.y_proj(y)], dim=-1)  # (B, T, 2*I)
 
-        return torch.stack(preds, dim=1)  # (B,T,D) now D=h_dim
+        # ───── Manual stepping for GRUCell ─────
+        if isinstance(self.rnn, nn.GRUCell):
+            h = e.new_zeros(B, D)
+            preds = []
+            for t in range(T):
+                h = self.rnn(fused[:, t], h)
+                preds.append(h.clone())
+            out = torch.stack(preds, dim=1)  # (B, T, D)
+
+        # ───── Full-sequence GRU ─────
+        else:
+            h0 = e.new_zeros(L, B, D)
+            out, _ = self.rnn(fused, h0)  # (B, T, D)
+
+        # ───── Mask out padded positions ─────
+        mask = (
+            torch.arange(T, device=lengths.device)
+            .unsqueeze(0)                # (1, T)
+            .expand(B, T)                # (B, T)
+            < lengths.unsqueeze(1)       # (B, 1)
+        )                                # → bool mask of shape (B, T)
+
+        out = out * mask.unsqueeze(-1)   # (B, T, D)
+        
+        state_decoder_out = self.state_head(torch.cat([out,fused], dim=-1))  # (B, T, state_dim)
+        recon_out = self.recon_head(out)  # (B, T, state_dim)
+        #decoder_out = self.cls_head(out)  # (B, T, state_dim)
+
+        return state_decoder_out, recon_out
 
     # ------------------------------------------------------------------
     def _step(self, batch):
-        e, y, target_h = batch["e"], batch["y"], batch["h"]
-        lengths = batch["lengths"]
+        e, y, target_h = batch["e"], batch["y"], batch["h"] # (B, T, e_dim), (B, T, y_dim), (B, T+1, D)
+        lengths = batch["lengths"] # (B,)
+        label = batch["label"] # (B,T+1, state_dim)
 
-        pred_h = self._rollout(e, y)
-        tgt_h = target_h[:, :MAX_SEQ_LEN]
+        pred_cls, pred_recon = self._rollout(e, y, lengths)
+        
+        # Only compute reconstruction loss for positive labels      
+        target = target_h[:, 1:]  # (B, T, D)
+
+        # Mask: (B, T)
+        mask = (
+            torch.arange(target.size(1), device=lengths.device)
+            .unsqueeze(0).expand(lengths.size(0), -1)
+            < lengths.unsqueeze(1)
+        )
 
         if self.recon_loss == "mse":
-            loss_recon = F.mse_loss(pred_h, tgt_h)
+            # (B, T, D) -> (B, T)
+            mse = F.mse_loss(pred_recon, target, reduction='none').mean(dim=-1)
+            loss_recon = (mse * mask).sum() / mask.sum()
         else:
-            cos = F.cosine_similarity(pred_h, tgt_h, dim=-1)
-            loss_recon = (1 - cos).mean()
+            cos = F.cosine_similarity(pred_recon, target, dim=-1)  # (B, T)
+            loss_recon = ((1 - cos) * mask).sum() / mask.sum()
 
-        # classification on the *true* last timestep
-        label = batch["label"]
-        last_hidden = pred_h.gather(
-            1,
-            (lengths - 1).unsqueeze(-1).unsqueeze(-1).expand(-1, 1, pred_h.size(-1)),
-        ).squeeze(1)
-        pred_cls = self.cls_head(last_hidden)
-        loss_cls = self.bce(pred_cls, label.unsqueeze(1))
+        # Compute BCE loss per element: (B, T, state_dim)
+        raw_loss_cls = F.binary_cross_entropy_with_logits(pred_cls, label[:, 1:], reduction='none')
+
+        # Apply mask: only count valid timesteps
+        masked_loss = raw_loss_cls * mask.unsqueeze(-1)
+
+        # Normalize by number of unmasked elements
+        loss_cls = masked_loss.sum() / mask.sum()
 
         loss = loss_recon + self.cls_w * loss_cls
+        #loss = loss_cls
         return loss, loss_recon, loss_cls
 
     # ------------------------------------------------------------------
@@ -251,10 +304,10 @@ class EventRNN(pl.LightningModule):
 ###############################################################################
 if __name__ == "__main__":
     train_loader, val_loader = make_loaders(
-        "sequential_tasks/data/dataset.json", batch_size=64
+        "sequential_tasks/data/dataset_full.json", batch_size=128
     )
 
-    model = EventRNN(event_dim=3, y_dim=1024, h_dim=1024)
+    model = EventRNN(event_dim=3, y_dim=1024, latent_dim=1024, state_dim=4, input_dim=16, num_layers=1)
 
-    trainer = pl.Trainer(max_epochs=100, accelerator="auto", log_every_n_steps=10)
+    trainer = pl.Trainer(max_epochs=400, accelerator="auto", log_every_n_steps=10)
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)

@@ -22,40 +22,51 @@ DATASET_JSON  = Path("sequential_tasks/data/merged.json")   # ← edit me
 OUTPUT_JSON   = Path("sequential_tasks/data/dataset_no_summary_flag_home.json")  # ← edit me or set to None
 RNG_SEED      = 42                          # set None for non-deterministic
 # ─────────────────────────────────────────────────────────── #
+DEAD_STATE: str = "dead"
+EMBEDDING_DIM : int = 1024
 
 def _sample_one(state: Hashable,
-                pool: List[Dict[str, Any]]) -> Tuple[str, Any]:
+                dataset: Dict[Hashable, List[Dict[str, Any]]]) -> Tuple[str, Any]:
     """Pick one `{response, embedding}` for *state*."""
-    if not pool:
-        raise ValueError(f"Dataset entry for state {state!r} is empty")
-    rec = random.choice(pool)
-    if "response" not in rec or "embedding" not in rec:
-        raise ValueError(f"Object for {state!r} lacks 'response' or 'embedding'")
-    return rec["response"], rec["embedding"]
+    if state == DEAD_STATE:
+        dict = {"response": "", "embedding": [0.0] * EMBEDDING_DIM}
+    else: 
+        pool = dataset[state]
+        if not pool:
+            raise ValueError(f"Dataset entry for state {state!r} is empty")
+        rec = random.choice(pool)
+        if "response" not in rec or "embedding" not in rec:
+            raise ValueError(f"Object for {state!r} lacks 'response' or 'embedding'")
+        
+        dict = {"response": rec["response"], "embedding": rec["embedding"]}
+        if "grid" in rec: 
+            dict["grid"] = rec["grid"]
+    return dict
 
 def extend_sequences(
-    seq_list: List[Dict[str, List[Any]]],
+    seq_list: List[Dict[str, List[Any]]], 
     dataset: Dict[Hashable, List[Dict[str, Any]]],
 ) -> List[Dict[str, List[Any]]]:
     """Return new list with `responses` and `embeddings` added to every item."""
     # one random pair per unique state
-    unique_states = [
-        {state                       # or use [...] if you prefer a list
-        for state, n in Counter(seq["states"]).items()}                  # keep states that appear exactly once
-        for seq in seq_list
-    ]
     state_to_pair = [{
-        state: _sample_one(state, dataset[state]) for state, n in Counter(seq["states"]).items()}                  # keep states that appear exactly once
+        state: _sample_one(state, dataset) for state, n in Counter(seq["states"]).items()}                  # keep states that appear exactly once
         for seq in seq_list 
     ]
 
     extended: List[Dict[str, Any]] = []
     for i, seq in enumerate(seq_list):
-        responses  = [state_to_pair[i][s][0] for s in seq["states"]]
-        embeddings = [state_to_pair[i][s][1] for s in seq["states"]]
+        responses  = [state_to_pair[i][s]["response"] for s in seq["states"]]
+        embeddings = [state_to_pair[i][s]["embedding"] for s in seq["states"]]
         new_seq = deepcopy(seq)
         new_seq["responses"]  = responses
         new_seq["embeddings"] = embeddings
+        
+        for s in seq["states"]:
+            if "grid"in state_to_pair[i][s]:
+                # If "grid" is present in the state, add it to the new sequence
+                new_seq["grid"] = state_to_pair[i][s]["grid"]
+                break
         extended.append(new_seq)
     return extended
 

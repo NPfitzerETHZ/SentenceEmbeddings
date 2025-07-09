@@ -26,6 +26,7 @@ MIN_STEPS: int = 2   # inclusive lower bound for random sequence length L
 MAX_STEPS: int = 8  # inclusive upper bound for L
 REPS: int = 500        # generate REPS successes + REPS failures per DFA
 RNG_SEED: int | None = 42  # None ➟ do not reset RNG
+DEAD_STATE: str = "dead"  # name of the dead state, if any
 
 # --------------------------------------------------------------------------- #
 #  Generic DFA machinery
@@ -34,7 +35,8 @@ RNG_SEED: int | None = 42  # None ➟ do not reset RNG
 EVENTS: Sequence[str] = ("a", "b", "c")              # index 0,1,2 ↔ a,b,c
 Vector = List[int]                                      # e.g. [0, 1, 0]
 State = str
-Trace = List[Tuple[Vector, State]]                     # [(vec, next_state), …]
+Success = bool
+Trace = Tuple[Vector, State, Vector]                    # [(vec, next_state), …]
 
 
 class Automaton:
@@ -47,19 +49,43 @@ class Automaton:
         self._transition = transition
         self._initial = initial
         self._finals = finals
+        self.failed_transition = False
 
     # ----------------------- core DFA API -----------------------
 
-    def step(self, state: State, vec: Vector) -> State:
-        return self._transition[state](vec)
-
-    def run(self, vectors: Sequence[Vector]) -> Tuple[Trace | List[State], bool]:
+    def step(self, state: State, vec: Vector, accept: bool) -> Tuple[State]:
+        
+        next_state = self._transition[state](vec)
+        random_state = random.choice(list(self._transition.keys()))
+        if not accept:
+            if next_state == random_state and not self.failed_transition:
+                # If the next state is the same as the random state, we can return it directly
+                return random_state
+            else:
+                self.failed_transition = True
+                return DEAD_STATE
+        return self._transition[state](vec) 
+    
+    def run(self, vectors: Sequence[Vector], accept: bool) -> List[Trace]:
         state: State = self._initial
-        trace: List[State | Tuple[Vector, State]] = [state]
+        trace: List[Trace] = [( None, state, self.state_to_one_hot(state))] 
         for v in vectors:
-            state = self.step(state, v)
-            trace.append((v, state))
-        return trace, (state in self._finals)
+            if not self.failed_transition:
+                state = self.step(state, v, accept)
+            state_one_hot = self.state_to_one_hot(state)
+            trace.append((v, state, state_one_hot))
+        return trace
+
+    def state_to_one_hot(self, state: State) -> Vector:
+        """Convert a state to its one-hot encoding."""
+        one_hot = [0] * (len(self._transition) + 1)
+        if state is DEAD_STATE:
+            one_hot[-1] = 1  # last index for None state
+            return one_hot
+        else:
+            index = list(self._transition.keys()).index(state)
+            one_hot[index] = 1
+            return one_hot
 
 
 # --------------------------------------------------------------------------- #
@@ -74,26 +100,18 @@ def rand_vec() -> Vector:
 def random_walk(
     automaton: Automaton,
     steps: int,
-    accept: bool,
-    *,
-    max_attempts: int = 1_000,
+    accept: bool
 ) -> Trace:
-    for _ in range(max_attempts):
-        vecs = [rand_vec() for _ in range(steps)]
-        trace, ok = automaton.run(vecs)
-        if ok == accept:
-            return trace
-    raise RuntimeError("Could not satisfy requested outcome in random_walk")
-
+    vecs = [rand_vec() for _ in range(steps)]
+    return automaton.run(vecs, accept)
 
 # JSON conversion -----------------------------------------------------------
 
-
-def record_trace(trace: List[State | Tuple[Vector, State]], accepted: bool) -> dict:
-    events = [vec for (vec, _) in trace[1:]]
-    states = [trace[0]] + [st for (_, st) in trace[1:]]
-    return {"events": events, "states": states, "success": accepted}
-
+def record_trace(trace: List[State | Tuple[Vector, Vector]],  accept : bool) -> dict:
+    events = [vec for (vec, _, _) in trace[1:]]
+    states = [st for (_, st, _) in trace]
+    label = [lb for (_,_, lb) in trace]
+    return {"events": events, "states": states, "label": label, "success": accept}
 
 # --------------------------------------------------------------------------- #
 #  Mini‑DSL: describe each DFA in one @dataclass (no experiment params here!)
@@ -150,8 +168,9 @@ def defend_config() -> DFAConfig:
             return "P2"
         return "P1" if b else "E"
 
-    def next_P2(_):
-        return "P2"
+    def next_P2(v):
+        _, _, c = v
+        return "P2" if c else "P1"
 
     return DFAConfig(
         name="defend",
@@ -174,11 +193,12 @@ def run_and_save(cfg: DFAConfig) -> None:
     dfa = Automaton(cfg.transition, cfg.initial, cfg.finals)
 
     all_runs: List[dict] = []
-    for accept in (True, False):
+    for accept in (True, True):
         for _ in range(REPS):
             L = random.randint(MIN_STEPS, MAX_STEPS)
+            dfa.failed_transition = False
             trace = random_walk(dfa, L, accept)
-            all_runs.append(record_trace(trace, accept))
+            all_runs.append(record_trace(trace,accept))
 
     cfg.outfile.parent.mkdir(parents=True, exist_ok=True)
     cfg.outfile.write_text(json.dumps(all_runs, indent=2))
